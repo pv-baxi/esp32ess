@@ -41,9 +41,7 @@ Windows 10 to compile this code.
 
 ### Hardware
 
-For how to build the hardware of this project, please see
-
-[Documentation] (docs/README.md)
+For how to build the hardware of this project, please see the [Documentation](/docs/README.md).
 
 ### Installing
 
