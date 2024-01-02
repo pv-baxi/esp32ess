@@ -1,4 +1,4 @@
-# Victron Multiplus 2 ESS control using ESP32 and VE.Bus
+# Victron Multiplus 2 ESS using ESP32 controlling VE.Bus
 
 Implements an ESS system with Victron Multiplus II and Pylontech batteries.
 Instead by a Cerbo GX, the Multiplus is directly controlled by the ESP32 via
