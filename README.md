@@ -41,7 +41,9 @@ Windows 10 to compile this code.
 
 ### Hardware
 
-For how to build the hardware of this project, please see the [Documentaion] (docs/README.md).
+For how to build the hardware of this project, please see
+
+[Documentation] (docs/README.md)
 
 ### Installing
 
@@ -53,7 +55,7 @@ For how to build the hardware of this project, please see the [Documentaion] (do
 
 Contributors names and contact info
 
-PV Baxi (pv-baxi@gmx.de)
+Baxi (pv-baxi@gmx.de)
 
 ## Version History
 
