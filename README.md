@@ -22,7 +22,7 @@ in front of the Multiplus device, meaning in parallel to ACin or connected to
 other electrical phases, if one whishes to also compensate this energy to let
 a totalizing power meter show zero.
 
-In a conventional ESS system an additional electic meter is required to be
+In a conventional ESS system an additional electric meter is required to be
 installed. This code can use the optical 1/10000kWh impulse output that most
 official digital meters already have.
 
@@ -47,7 +47,7 @@ For how to build the hardware of this project, please see the [Documentaion] (do
 
 * Load latest firmware onto your Victron Multiplus II
 * Configure your Multiplus with ESS assistant
-* Download this code onto your hardware
+* Download this code onto your ESP32 hardware
 
 ## Authors
 
@@ -67,7 +67,7 @@ This project is licensed under the GNU General Public License v3.0 or later - se
 ## Acknowledgments
 
 * [VictronEnergy] (https://www.victronenergy.com/upload/documents/Technical-Information-Interfacing-with-VE-Bus-products-MK2-Protocol-3-14.pdf)
-* [ASCIIart](https://patorjk.com/software/taag/#p=display&f=Standard&t=)
+* [ASCIIart] (https://patorjk.com/software/taag/#p=display&f=Standard&t=)
 * [LiquidCrystal] (https://github.com/arduino-libraries/LiquidCrystal)
 * [WebServer] (https://github.com/espressif/arduino-esp32/tree/master/libraries/WebServer)
 * [ESPmDNS] (https://github.com/espressif/arduino-esp32/tree/master/libraries/ESPmDNS)
