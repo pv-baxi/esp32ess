@@ -117,7 +117,7 @@ After the command has been assembled and 0xFA..FF has been replaced, a checksum 
 
 Like all the other data, it's not allowed to be between 0xFA and 0xFF. So in case of such result, an 0xFA is inserted in front of the checksum and also included into the checksum calculation. Finally the "End Of Frame" character 0xFF is appended to the command. Then it's ready to be send out.
 
-## VE.Bus receive frames
+### VE.Bus receive frames
 
 In the function _multiplusCommandHandling()_ I'm looking for the following frames to be received from the Multiplus:
 
@@ -150,7 +150,9 @@ As soon as a sync frame is received, it reads the frame number, increases it by 
 
 When it receives a successful acknowledge frame, it checks if it was in time and if yes, counts our ESS command as acknowledged.
 
-### Improvement
+## Improvements
+
+### Make _multiplusCommandHandling()_ an ISR
 
 The function _multiplusCommandHandling()_ should actually be an interrupt service routine (ISR). Because then it could react on commands, especially the sync frame exactly in time.
 
