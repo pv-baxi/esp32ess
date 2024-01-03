@@ -46,15 +46,14 @@ Currently there are no additional dependencies. All used libraries are
 included in the Arduino IDE. The author was using Arduino IDE version 2.2.1 on
 Windows 10 to compile this code.
 
-### Hardware
-
-For how to build the hardware of this project, please see the [Hardware documentation](docs/README.md#hardware).
-
 ### Installing
 
-* Load latest firmware onto your Victron Multiplus II
-* Configure your Multiplus with ESS assistant
-* Download this code onto your ESP32 hardware
+* Build your hardware according to the [Hardware documentation](docs/README.md#hardware).
+* Update your Victron Multiplus II to latest firmare using an MK3 interface. (I am using v502 on my Multiplus II 48/5000).
+* Configure your Multiplus with ESS assistant and correct voltage thresholds etc. matching your battery.
+* Create Arduino project with _esp32ess.ino_
+* Add file _my_wifi_pw.h_ into your Arduino project directory and edit this file with your WiFi credentials.
+* Compile and upload this code onto your ESP32 hardware
 
 ## Authors
 
