@@ -83,18 +83,40 @@ at exact time positions between two synchronization frames.
 
 For sending the desired ESS power towards the Multiplus, I'm using command 0x37 (CommandWriteViaID). This command is described on higher level (as MK3 interface command) in the [Victron manual](https://www.victronenergy.com/upload/documents/Technical-Information-Interfacing-with-VE-Bus-products-MK2-Protocol-3-14.pdf).
 
-In chapter 7.3.11 the description starts with the 0x37 command ID. The bytes to be sent before I found out by sniffing the data between the MK3 interface and the Multiplus when running VEConnect software. Here an example of the full command:
+In chapter 7.3.11 the description starts with the 0x37 command ID. The bytes to be sent before I found out by sniffing the data between the MK3 interface and the Multiplus when running VEConnect software. Here an example of the full command in HEX format:
 
-0x98 0xF7 0xFE 0xXX 0x00 0xE6 **0x37** 0x02 0x83 0xLO 0xHI 0xCC 0xFF
-* 0x98 0xF7 = looks like a device address (from MK3? or to Multiplus?)
-* 0xFE      = differentiates between a data frame (0xFE) and a synchronization frame (0xFD)
-* 0xXX      = frame number as increasing counter wrapping between 0 and 127. In our command, it has to match the last frame number send/received over the VE.Bus plus +1. If this number is not correct, the command will be ignored by the Multiplus.
-* 0x00 0xE6 = two-bytes number, which can be self-defined within some boundaries. It is repeated by the Multiplus in its acknowledgment responses. With that we can find out if the the Multiplus is answering to our own command.
-* 0x37      = CommandWriteViaID
-* 0x02      = Flags, 0x02 = RAMvar and no EEPROM storage
-* 0x83      = ID = address of ESS power in assistand memory
+98 F7 FE XX 00 E6 **37** 02 83 LO HI YY FF
+* 98 F7 = looks like a device address (from MK3? or to Multiplus?)
+* FE      = differentiates between a data frame (0xFE) and a synchronization frame (0xFD)
+* XX      = frame number as increasing counter wrapping between 0 and 127. In our command, it has to match the last frame number send/received over the VE.Bus plus +1. If this number is not correct, the command will be ignored by the Multiplus.
+* 00 E6 = two-bytes number, which can be self-defined within some boundaries. It is repeated by the Multiplus in its acknowledgment responses. With that we can find out if the the Multiplus is answering to our own command.
+* 37      = CommandWriteViaID
+* 02      = flags according to MK3 manual: 0x02 = RAMvar and no EEPROM storage
+* 83      = ID, address of ESS power value in assistant memory
+* LO      = low-byte of our desired 16 bit integer ESS power value
+* HI      = high-byte of our desired 16 bit integer ESS power value
+* YY      = Checksum
+* FF      = End Of Frame character
 
-For the complete command, look in my code into prepareESScommand() and the following functions for byte replacements and checksum.
+Note that the command cannot be sent just like this. Before sending out, byte-replacement needs to be done and then the checksum needs to be calculated.
+
+#### Byte replacement
+
+After the pure VE.Bus commmand has been assembled, this function searches through the command bytes following the frame number and replaces bytes between 0xFA and 0xFF with the following two-bytes sequences:
+* 0xFA -> 0xFA 0x7A
+* 0xFB -> 0xFA 0x7B
+* 0xFC -> 0xFA 0x7C
+* 0xFD -> 0xFA 0x7D
+* 0xFE -> 0xFA 0x7E
+* 0xFF -> 0xFA 0x7F
+
+#### Checksum calculation
+
+After the command has been assembled and 0xFA..FF has been replaced, a checksum needs to be added. The checksum is 8 bit and for a frame of N bytes from 0..(N-1) it is calculated as:
+
+0xYY = 1 - b[2] - b[3] - b[4] - ... - b[N-2] - b[N-1]
+
+Like all the other data, it's not allowed to be between 0xFA and 0xFF. So in case of such result, an 0xFA is inserted in front of the checksum and also included into the checksum calculation. Finally the "End Of Frame" character 0xFF is appended to the command. Then it's ready to be send out.
 
 ## VE.Bus receive frames
 
