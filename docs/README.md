@@ -93,8 +93,7 @@ In chapter 7.3.11 the description starts with the 0x37 command ID. The bytes to 
 * 37      = CommandWriteViaID
 * 02      = flags according to MK3 manual: 0x02 = RAMvar and no EEPROM storage
 * 83      = ID, address of ESS power value in assistant memory
-* LO      = low-byte of our desired 16 bit integer ESS power value
-* HI      = high-byte of our desired 16 bit integer ESS power value
+* LO HI   = Desired 16 bit integer ESS power value. (Low byte first.) Negative ESS power values mean charging the battery and positive ESS power values mean feeding power into the grid.
 * YY      = Checksum
 * FF      = End Of Frame character
 
