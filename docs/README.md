@@ -8,6 +8,8 @@ The hardware for this project was built using the following components:
 * SN65HVD230 CAN bus transceiver
 * LC Display 4x20 HD44780
 * Optical impulse receiver circuit
+* red LED (with 270 Ohm resistor)
+* 2x RJ45 sockets and Network cables for VE.Bus and battery CAN
 
 Find a photo of my control board implementation below:
 
@@ -31,6 +33,13 @@ The MAX485 circuit is connected to the ESP32 using the following three pins: DI,
 
 All three pins are routed to the ESP32 through bidirectional level translators. For current pin assignment, please see "Constants"-section of the source code.
 
+Pinout on the RJ45 socket towards the Multiplus VE.Bus is as follows. Only pins 4 & 5 need to be connected, leave the other pins open: 
+* Pin 1 = n.c (lowermost pin in my photo)
+* Pin 4 = A = D+
+* Pin 5 = B = D-
+
+The complete pin assignment is provided by Victron on page 2 of the following [schematic](https://github.com/victronenergy/venusgx-hardware/blob/master/VE_BBB_Cape_v0.80_released.pdf).
+
 ### SN65HVD230 CAN bus transceiver
 
 In my hardware I'm using the Texas Instruments SN65HVD230 CAN bus transceiver, which has officially to be powered with 3.3V, nicely matching the operating voltage of the ESP32.
@@ -38,6 +47,11 @@ In my hardware I'm using the Texas Instruments SN65HVD230 CAN bus transceiver, w
 However, it took me quite some time to find out, that my cheap SN65HVD230 was a fake IC. With 3.3V operating voltage it's already able to read/sniff CAN bus messages, but it's not able to acknowledge them. Without acknowledgment, our battery will not send the desired 0x355 message with the charge level.
 
 For me it helped to power my fake SN65HVD230 with 5.0V instead and connect both CTX and CRX pins to the ESP32 using a bidirectional level translator circuit. Then it was "magically" starting to acknowledge messages and everything suddently worked as desired.
+
+Pinout on the RJ45 socket towards the Pylontech battery is as follows:
+* (Pin 1 = lowermost pin in my photo)
+* Pin 4 = CAN_H
+* Pin 5 = CAN_L
 
 ### LC Display 4x20 HD44780
 
