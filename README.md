@@ -30,7 +30,7 @@ official digital meters already have.
 
 Note that currently this code only supports a single Multiplus device (single-
 phase). In the future it might be extended to also control a three-phase
-Multiplus system. If interested in this, read [here](docs/README.md#improvement).
+Multiplus system. If interested in this, read [here](docs/README.md#improvements).
 
 ## VE.Bus
 
