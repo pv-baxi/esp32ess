@@ -122,34 +122,38 @@ Like all the other data, it's not allowed to be between 0xFA and 0xFF. So in cas
 
 In the function _multiplusCommandHandling()_ I'm looking for the following frames to be received from the Multiplus:
 
-1. Sync frame, sent by Multiplus every 20ms (50Hz), example:   
-   83 83 FD 02 55 51 18 02 97 FF
-      * 83 83 = device address (from Multiplus?)
-      * FD    = sync frame
-      * 02    = frame number (0..127), increases on every frame
-      * 55    = "special" character (= 01010101 binary) indicating the sync frame
-      * 51    = unknown, maybe device status?
-      * 18 02 = 16 bit time stamp, unit = ~0.09ms = ~90µs, b[7]=MSB, b[6]=LSB
-      * 97    = Checksum. Special is that b[4]=0x55 is excluded from calculation
-      * FF    = End Of Frame character
+#### Sync frame, sent by Multiplus every 20ms (50Hz)
 
-2. Acknowledge frame for our ESS command, example:
-   83 83 FE 3C 00 E6 87 5A FF
-   * 83 83 = device address (from Multiplus?)
-   * FE    = data frame
-   * 3C    = frame number (0..127), increases on every frame
-   * 00 E6 = our own ID defined in prepareESScommand() function
-   * 87    = Response as defined in Victron manual for CommandWriteViaID:
-     - 0x80 = Command not supported
-     - 0x87 = Write ramvar OK
-     - 0x88 = Write setting OK
-     - 0x9B = Access level required
-   * 5A    = Checksum
-   * FF    = End Of Frame character
+Example:   
+83 83 FD 02 55 51 18 02 97 FF
+ * 83 83 = device address (from Multiplus?)
+ * FD    = sync frame
+ * 02    = frame number (0..127), increases on every frame
+ * 55    = "special" character (= 01010101 binary) indicating the sync frame
+ * 51    = unknown, maybe device status?
+ * 18 02 = 16 bit time stamp, unit = ~0.09ms = ~90µs, b[7]=MSB, b[6]=LSB
+ * 97    = Checksum. Special is that b[4]=0x55 is excluded from calculation
+ * FF    = End Of Frame character
+
+As soon as a sync frame is received, function _multiplusCommandHandling()_ reads the frame number, increases it by one and is ready to send out the ESS command if desired.
+
+#### Acknowledge frame for our ESS command
+
+Example:   
+83 83 FE 3C 00 E6 87 5A FF
+ * 83 83 = device address (from Multiplus?)
+ * FE    = data frame
+ * 3C    = frame number (0..127), increases on every frame
+ * 00 E6 = our own ID defined in prepareESScommand() function
+ * 87    = Response as defined in Victron manual for CommandWriteViaID:
+   - 0x80 = Command not supported
+   - 0x87 = Write ramvar OK
+   - 0x88 = Write setting OK
+   - 0x9B = Access level required
+ * 5A    = Checksum
+ * FF    = End Of Frame character
   
-As soon as a sync frame is received, it reads the frame number, increases it by one and is ready to send out our ESS command if desired.
-
-When it receives a successful acknowledge frame, it checks if it was in time and if yes, counts our ESS command as acknowledged.
+When _multiplusCommandHandling()_ receives a successful acknowledge frame, it checks if it was in time and if yes, counts the ESS command as acknowledged.
 
 ### Other sniffed VE.Bus frames
 
