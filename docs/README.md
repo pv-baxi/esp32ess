@@ -9,6 +9,10 @@ The hardware for this project was built using the following components:
 * LC Display 4x20 HD44780
 * Optical impulse receiver circuit
 
+Find a photo of my control board implementation below:
+
+![control board photo](esp32ess_control_board.jpg)
+
 ### ESP32-DevKitC V4
 
 V4 DevKit was used due to the improved WiFi antenna. But other boards will surely work as well.
@@ -37,12 +41,18 @@ For me it helped to power my fake SN65HVD230 with 5.0V instead and connect both 
 
 ### LC Display 4x20 HD44780
 
-As I like those ASCII displys from my past, and they are easily accessible from trashed electronics, I've used one in my hardware. It's connected to the EPS32 in parallel 4-bit mode via pins RS, EN, D4..D7. The pins RW and the contrast voltage I've hardwired to Vss (Gnd). The display needs 5V. But as it only works in receive-mode (RW=0) and is able to handle the 3.3V levels correctly, I didn't use level converters.
+As I like those ASCII displys from my past, and they are easily accessible from trashed electronics, I've used one in my hardware. It's connected to the ESP32 in parallel 4-bit mode via pins RS, EN, D4..D7. The pins RW and the contrast voltage I've hardwired to Vss (Gnd). The display needs 5V. But as it only works in receive-mode (RW=0) and is able to handle the 3.3V levels correctly, I didn't use level converters.
 
 For current pin assignment, please see "Constants"-section of the source code.
 
 ### Optical impulse receiver circuit
 
-For receiving the infrared 1/10000kWh impulses from my power meter, I build a small circuit based on the LM393 comperator IC. Note the the IR diode is actually a TRANSMITTER diode from an old remote control. All my available reveiver diodes didn't work due to the wrong wavelength of the grey filter plastics. But in my experiments I noticed that a transmitter diode with shiny plastics also works nicely as receiver.
+For receiving the infrared 1/10000kWh impulses from my power meter, I build a small circuit based on the LM393 comperator IC. Note the the IR diode is actually a TRANSMITTER diode from an old remote control. All my available reveiver diodes didn't work due to the wrong wavelength of the grey filter plastics. But in my experiments I noticed that a transmitter diode (with shiny plastics) also works nicely as receiver.
 
-Please see my photo for a first impression. A schematic will follow. 
+Please find the circuit below (also avalable as [KiCad Schematic](optical_circuit.kicad_sch)):
+
+![optical sensor schematic](optical_circuit.png)
+
+Here a photo of my implementation mounted in front of my power meter:
+
+![optical sensor photo](esp32ess_optical_sensor.jpg)
