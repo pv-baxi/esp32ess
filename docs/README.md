@@ -56,7 +56,7 @@ For current pin assignment, please see "Constants"-section of the source code. T
 
 ### Optical impulse receiver circuit
 
-For receiving the infrared 1/10000kWh impulses from my power meter, I build a small circuit based on the LM393 comperator IC. Note the the IR diode is actually a TRANSMITTER diode from an old remote control. All my available reveiver diodes didn't work due to the wrong wavelength of the grey filter plastics. But in my experiments I noticed that a transmitter diode (with shiny plastics) also works nicely as receiver.
+For receiving the infrared 1/10000kWh impulses from my power meter, I build a small circuit based on the LM393 comperator IC. Note the the IR diode is actually a **transmitter** diode from an old remote control. All my available reveiver diodes didn't work due to the wrong wavelength of the grey filter plastics. But in my experiments I noticed that a transmitter diode (with shiny plastics) also works nicely as receiver.
 
 Please find the circuit below (also avalable as [KiCad Schematic](optical_circuit.kicad_sch)):
 
@@ -81,13 +81,16 @@ at exact time positions between two synchronization frames.
 
 ### VE.Bus send frames
 
-For sending the desired ESS power towards the Multiplus, I'm using command 0x37 (CommandWriteViaID). This command is described on higher level (as MK3 interface command) in the following [Victron manual](https://www.victronenergy.com/upload/documents/Technical-Information-Interfacing-with-VE-Bus-products-MK2-Protocol-3-14.pdf).
+For sending the desired ESS power towards the Multiplus, I'm using command 0x37 (CommandWriteViaID). This command is described on higher level (as MK3 interface command) in the [Victron manual](https://www.victronenergy.com/upload/documents/Technical-Information-Interfacing-with-VE-Bus-products-MK2-Protocol-3-14.pdf).
 
-In the manual chapter 7.3.11 the description starts with the 0x37 command ID. The bytes to be sent before I found out by sniffing the data between the MK3 interface and the Multiplus when running VEConnect software.
+In the manual chapter 7.3.11 the description starts with the 0x37 command ID. The bytes to be sent before I found out by sniffing the data between the MK3 interface and the Multiplus when running VEConnect software. Here an example of the full command:
 
-The first two bytes look like a device address (0x98 0xF7). The 3rd byte differentiates between a data frame (0xFE) and a synchronization frame (0xFD).
+0x98 0xF7 0xFE 0xXX 0x00 0xE6 **0x37** 0x02 0x83 0xLO 0xHI 0xCC 0xFF
+* 0x98 0xF7 = looks like a device address (from MK3? to Multiplus?)
+* 0xFE      = differentiates between a data frame (0xFE) and a synchronization frame (0xFD)
+* 0xXX      = frame number as increasing counter wrapping between 0 and 127
 
-The frame number following is an increasing counter wrapping between 0 and 127. In our command, it has to match the last frame number send/received over the VE.Bus plus +1. If this number is not correct, the command will be ignored by the Multiplus.
+The . In our command, it has to match the last frame number send/received over the VE.Bus plus +1. If this number is not correct, the command will be ignored by the Multiplus.
 
 Then a two-bytes number is following, which can be self-defined within some boundaries. It is repeated by the Multiplus in its acknowledgment responses. With that we can find out if the the Multiplus is answering to our own command. I'm using 0x00 0xE6 in my code.
 
