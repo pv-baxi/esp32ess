@@ -86,10 +86,10 @@ For sending the desired ESS power towards the Multiplus, I'm using command 0x37 
 In chapter 7.3.11 the description starts with the 0x37 command ID. The bytes to be sent before I found out by sniffing the data between the MK3 interface and the Multiplus when running VEConnect software. Here an example of the full command in HEX format:
 
 98 F7 FE XX 00 E6 **37** 02 83 LO HI YY FF
-* 98 F7 = looks like a device address (from MK3? or to Multiplus?)
+* 98 F7   = device address (from MK3? or to Multiplus?)
 * FE      = differentiates between a data frame (0xFE) and a synchronization frame (0xFD)
 * XX      = frame number as increasing counter wrapping between 0 and 127. In our command, it has to match the last frame number send/received over the VE.Bus plus +1. If this number is not correct, the command will be ignored by the Multiplus.
-* 00 E6 = two-bytes number, which can be self-defined within some boundaries. It is repeated by the Multiplus in its acknowledgment responses. With that we can find out if the the Multiplus is answering to our own command.
+* 00 E6   = two-bytes number, which can be self-defined within some boundaries. It is repeated by the Multiplus in its acknowledgment responses. With that we can find out if the the Multiplus is answering to our own command.
 * 37      = CommandWriteViaID
 * 02      = flags according to MK3 manual: 0x02 = RAMvar and no EEPROM storage
 * 83      = ID, address of ESS power value in assistant memory
@@ -120,11 +120,11 @@ Like all the other data, it's not allowed to be between 0xFA and 0xFF. So in cas
 
 ## VE.Bus receive frames
 
-In my code I'm looking for the following frames to be received from the Multiplus:
+In the function _multiplusCommandHandling()_ I'm looking for the following frames to be received from the Multiplus:
 
 1. Sync frame, sent by Multiplus every 20ms (50Hz), example:   
    83 83 FD 02 55 51 18 02 97 FF
-      * 83 83 = device address, here from Multiplus
+      * 83 83 = device address (from Multiplus? or to MK3?)
       * FD    = sync frame
       * 02    = frame number (0..127), increases on every frame
       * 55    = "special" character (= 01010101) indicating the sync frame
@@ -134,8 +134,8 @@ In my code I'm looking for the following frames to be received from the Multiplu
       * FF    = End Of Frame character
 
 2. Acknowledge frame for our ESS command, example:
-   83 83 fe 3c 00 e6 87 5a ff
-   * 83 83 = device address, here from Multiplus
+   83 83 FE 3C 00 E6 87 5A FF
+   * 83 83 = device address (from Multiplus? or to MK3?)
    * FE    = data frame
    * 3C    = frame number (0..127), increases on every frame
    * 00 E6 = our own ID defined in prepareESScommand() function
@@ -146,34 +146,15 @@ In my code I'm looking for the following frames to be received from the Multiplu
      - 0x9B = Access level required
    * 5A    = Checksum
    * FF    = End Of Frame character
-
   
-// As soon as a sync frame is received, it reads the frame number, increases
-// it by one and is ready to send out our ESS command if desired.
-// When it receives a successful acknowledge frame, it checks if it was in time
-// and if yes, counts our ESS command as acknowledged.
-//
-// IMPROVEMENT:
-// This function should actually be an interrupt service routine (ISR).
-// Because then it could react on commands, especially the sync frame exactly
-// in time.
-// The 50Hz sync frame basically gives the pace on the bus and is probably for
-// synchronizing all Multiplus devices in a three-phase AC system. The sync
-// frame should never be disturbed by other frames.
-// Data frames, like our ESS command have to be within specific time slots
-// between two sync frames. This can be seen when sniffing the bus with a
-// logic analyzer.
-// As we are currently executing this function from the main loop whenever we
-// have time, we're evaluating the sync command later, undefined in time. Thus
-// when we send out our ESS command as reaction on the sync frame, it's luck
-// if the timing was right or wrong. That's why I experience about 1% to 2% of
-// failed ESS commands that never get acknowledged. As we re-send on a fail,
-// this is currently not a huge problem.
-// However, with this design flaw I would never risk controlling a three-phase
-// Multiplus system, even though this would probably be possible.
-// Of course I tried putting this function into an ISR when writing this code.
-// But probably due to lack of my programming skills this never worked. The
-// code was crashing whenever I had a Serial1.xxxx() function within the ISR.
-// If somebody would be able to put this code into an ISR, this would be an
-// enormous improvement and would surely also make the failed ESS commands
-// disappear.
+As soon as a sync frame is received, it reads the frame number, increases it by one and is ready to send out our ESS command if desired.
+
+When it receives a successful acknowledge frame, it checks if it was in time and if yes, counts our ESS command as acknowledged.
+
+### Improvement
+
+The function _multiplusCommandHandling()_ should actually be an interrupt service routine (ISR). Because then it could react on commands, especially the sync frame exactly in time.
+
+The 50Hz sync frame basically gives the pace on the bus and is probably for synchronizing all Multiplus devices in a three-phase AC system. The sync frame should never be disturbed by other frames. Data frames, like our ESS command have to be within specific time slots between two sync frames. This can be seen when sniffing the bus with a logic analyzer. As we are currently executing this function from the main loop whenever we have time, we're evaluating the sync command behind schedule, undefined in time. Thus when we send out our ESS command as reaction on the sync frame, it's luck if the timing was right or wrong. That's why I experience about 1% to 2% of failed ESS commands that never get acknowledged.
+
+As we re-send on a fail, this is currently not a huge problem. However, with this design flaw I would never risk controlling a three-phase Multiplus system, even though this would probably be possible. Of course I tried putting this function into an ISR when writing this code. But probably due to lack of my programming skills this never worked. The code was crashing whenever I had a Serial1.xxxx() function within the ISR. If somebody would be able to put this code into an ISR, this would be an enormous improvement and would surely also make the failed ESS commands disappear.
