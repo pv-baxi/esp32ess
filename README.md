@@ -17,7 +17,7 @@ In ACout2 configuration, input from an elecric meter might not even be
 required, as the ESS assistant inside the Multiplus will automatically
 compensate energy on ACout2 from/into the battery to always maintain 0W power
 at ACin if possible. Assuming it gets periodic 0W commands from this code via
-the VE.Bus.
+the [VE.Bus](#vebus).
 
 Input from an electric meter is needed if power is also sourced (or feed-in)
 in front of the Multiplus device, meaning in parallel to ACin or connected to
