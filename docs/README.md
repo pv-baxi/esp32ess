@@ -120,7 +120,7 @@ Like all the other data, it's not allowed to be between 0xFA and 0xFF. So in cas
 
 ### VE.Bus receive frames
 
-In the function _multiplusCommandHandling()_ I'm looking for the following frames to be received from the Multiplus:
+The function _multiplusCommandHandling()_ is looking for the following frames to be received from the Multiplus:
 
 #### Sync frame, sent by Multiplus every 20ms (50Hz)
 
