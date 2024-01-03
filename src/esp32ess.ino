@@ -11,6 +11,12 @@ https://github.com/pv-baxi/esp32ess
 All ASCII art is generated using the following generator with font "Standard":
 https://patorjk.com/software/taag/#p=display&f=Standard&t=
 
+Disclaimer:
+Use this code at your own risk. I don't take any responsibility for damage
+this code or the associated hardware might cause. Note that electrical
+installations are only allowed to be done (or modified) by persons having the
+skills and permission to do that.
+
 SPDX-FileCopyrightText: © 2023 PV Baxi <pv-baxi@gmx.de>
 SPDX-License-Identifier: GPL-3.0-or-later
 */
