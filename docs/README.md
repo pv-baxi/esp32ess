@@ -137,7 +137,7 @@ Example:
 
 As soon as a sync frame is received, function _multiplusCommandHandling()_ reads the frame number, increases it by one and is ready to send out the ESS command if desired.
 
-#### Acknowledge frame for our ESS command
+#### Acknowledge frame for ESS 0x37 command
 
 Example:   
 83 83 FE 3C 00 E6 87 5A FF
