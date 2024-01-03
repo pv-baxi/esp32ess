@@ -30,8 +30,13 @@ official digital meters already have.
 
 Note that currently this code only supports a single Multiplus device (single-
 phase). In the future it might be extended to also control a three-phase
-Multiplus system. If interested in this, read the description of function
-multiplusCommandHandling().
+Multiplus system. If interested in this, read [here](docs/README.md#improvement).
+
+## VE.Bus
+
+For hardware details read my documentation [here](docs/README.md#max485-converter-for-vebus).
+
+For software details read my documentation [here](docs/README.md#vebus).
 
 ## Getting Started
 
@@ -43,7 +48,7 @@ Windows 10 to compile this code.
 
 ### Hardware
 
-For how to build the hardware of this project, please see the [Documentation](/docs/README.md).
+For how to build the hardware of this project, please see the [Hardware documentation](docs/README.md#hardware).
 
 ### Installing
 
