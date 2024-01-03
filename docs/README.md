@@ -87,7 +87,7 @@ For sending the desired ESS power towards the Multiplus, I'm using command 0x37 
 In chapter 7.3.11 the description starts with the 0x37 command ID. The bytes to be sent before I found out by sniffing the data between the MK3 interface and the Multiplus when running VEConnect software. Here an example of the full command in HEX format:
 
 98 F7 FE XX 00 E6 **37** 02 83 LO HI YY FF
-* 98 F7   = device address (from MK3? or to Multiplus?)
+* 98 F7   = device address (from MK3 interface?)
 * FE      = differentiates between a data frame (0xFE) and a synchronization frame (0xFD)
 * XX      = frame number as increasing counter wrapping between 0 and 127. In our command, it has to match the last frame number send/received over the VE.Bus plus +1. If this number is not correct, the command will be ignored by the Multiplus.
 * 00 E6   = two-bytes number, which can be self-defined within some boundaries. It is repeated by the Multiplus in its acknowledgment responses. With that we can find out if the the Multiplus is answering to our own command.
@@ -124,10 +124,10 @@ In the function _multiplusCommandHandling()_ I'm looking for the following frame
 
 1. Sync frame, sent by Multiplus every 20ms (50Hz), example:   
    83 83 FD 02 55 51 18 02 97 FF
-      * 83 83 = device address (from Multiplus? or to MK3?)
+      * 83 83 = device address (from Multiplus?)
       * FD    = sync frame
       * 02    = frame number (0..127), increases on every frame
-      * 55    = "special" character (= 01010101) indicating the sync frame
+      * 55    = "special" character (= 01010101 binary) indicating the sync frame
       * 51    = unknown, maybe device status?
       * 18 02 = 16 bit time stamp, unit = ~0.09ms = ~90µs, b[7]=MSB, b[6]=LSB
       * 97    = Checksum. Special is that b[4]=0x55 is excluded from calculation
@@ -135,7 +135,7 @@ In the function _multiplusCommandHandling()_ I'm looking for the following frame
 
 2. Acknowledge frame for our ESS command, example:
    83 83 FE 3C 00 E6 87 5A FF
-   * 83 83 = device address (from Multiplus? or to MK3?)
+   * 83 83 = device address (from Multiplus?)
    * FE    = data frame
    * 3C    = frame number (0..127), increases on every frame
    * 00 E6 = our own ID defined in prepareESScommand() function
@@ -150,6 +150,22 @@ In the function _multiplusCommandHandling()_ I'm looking for the following frame
 As soon as a sync frame is received, it reads the frame number, increases it by one and is ready to send out our ESS command if desired.
 
 When it receives a successful acknowledge frame, it checks if it was in time and if yes, counts our ESS command as acknowledged.
+
+### Other sniffed VE.Bus frames
+
+#### E4 command
+
+Example:   
+83 83 FE 03 E4 80 50 C3 40 0D 03 00 0E 00 00 00 A8 09 00 7A FF
+  * 83 83 : device address, 0x8383 = Multiplus, 0x98f7 = MK3 Interface
+  * FE    : 0xfd = sync word; 0xfe = data word
+  * 03    : frame counter. Increases by 1 on every word, independent of sync or data
+  * E4    : command identifier (here 0xe4)
+  * 80 50 C3 40 : **still unknown**
+  * 0D 03 : 16 bit time stamp 1 = ~0.09ms = ~90µs, b[10]=MSB, b[9]=LSB
+  * 00 0E 00 00 00 A8 09 00 : **still unknown**
+  * 7A    : 8bit checksum. Following bytes are excluded: b[0..1]=0x8383, b[20]=0xff
+  * FF    : End Of Frame character
 
 ## Improvements
 
