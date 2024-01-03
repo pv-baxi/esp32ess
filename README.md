@@ -4,6 +4,8 @@ Implements an ESS system with Victron Multiplus II and Pylontech batteries.
 Instead by a Cerbo GX, the Multiplus is directly controlled by the ESP32 via
 the VE.Bus.
 
+![ESP32ESS hardware photo](docs/esp32ess_control_board.jpg)
+
 ## Description
 
 This ESS control code works for two famous Multiplus II wiring configurations:
@@ -67,6 +69,7 @@ This project is licensed under the GNU General Public License v3.0 or later - se
 ## Acknowledgments
 
 * [VictronEnergy] (https://www.victronenergy.com/upload/documents/Technical-Information-Interfacing-with-VE-Bus-products-MK2-Protocol-3-14.pdf)
+* [wkirby] (https://community.victronenergy.com/questions/64847/rj45-wires-used-by-vebus-pin-out.html)
 * [ASCIIart] (https://patorjk.com/software/taag/#p=display&f=Standard&t=)
 * [LiquidCrystal] (https://github.com/arduino-libraries/LiquidCrystal)
 * [WebServer] (https://github.com/espressif/arduino-esp32/tree/master/libraries/WebServer)
