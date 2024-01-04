@@ -56,7 +56,7 @@ For current pin assignment, please see "Constants"-section of the source code. T
 
 ### Optical impulse receiver circuit
 
-For receiving the infrared 1/10000kWh impulses from my power meter, I build a small circuit based on the LM393 comperator IC. Note the the IR diode is actually a **transmitter** diode from an old remote control. All my available reveiver diodes didn't work due to the wrong wavelength of the grey filter plastics. But in my experiments I noticed that a transmitter diode (with shiny plastics) also works nicely as receiver.
+For receiving the infrared 1/10000kWh impulses from my power meter, I build a small circuit based on the LM393 comperator IC. Note that the IR diode is actually a **transmitter** diode from an old remote control. All my available reveiver diodes didn't work due to the wrong wavelength of the grey filter plastics. But in my experiments I noticed that a transmitter diode (with shiny plastics) also works nicely as receiver.
 
 Please find the circuit below (also avalable as [KiCad Schematic](optical_circuit.kicad_sch)):
 
