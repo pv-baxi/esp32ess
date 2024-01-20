@@ -10,7 +10,7 @@ The hardware for this project was built using the following components:
 * Optical impulse receiver circuit
 * red LED (with 270 Ohm resistor)
 * 2x RJ45 sockets and network cables (for VE.Bus and battery CAN)
-* 5V USB power supply with Micro-USB cable (700mA is enough)
+* DC-DC step-down regulator 7..12V to 5V
 
 ### ESP32-DevKitC V4
 
@@ -65,6 +65,23 @@ Please find the circuit below (also avalable as [KiCad Schematic](optical_circui
 Here a photo of my implementation mounted in front of my power meter:
 
 ![optical sensor photo](esp32ess_optical_sensor.jpg)
+
+### DC-DC step-down regulator 7..12V to 5V
+
+Below is an extended pinout of the VE.Bus RJ45 connector. If a patch cable is used to connect the Multiplus to the control circuit, then the same pinout is also on the RJ45 socket of the control circuit:
+   * pin 2 = Vin+ 12V
+   * pin 3 = MK3_Gnd
+   * pin 4 = A = D+
+   * pin 5 = B = D-
+
+Vin+ is a 12V power source coming from the Multiplus. In my case I measured 11,65V without a sink and about 39 Ohms source impedance with a sink. Knowing that, about 700mW power can be drawn from Vin.
+
+This is not much, but enough to power the complete control circuit which takes about 90mA at 5V. For that I used the circuit from a cheap car-to-USB charger. My circuit uses the MC34063 chip. But other 12V to 5V step-down regulators, for example with chips MP2315 or MP2338 will surely work as well.
+
+I think important is, that the DC-DC regulator aready works with a minimum input voltage of 7V due to the high impedance of Vin. And it should have good efficiency at about 100mA with such low input voltage.
+
+The 5V output of the DC-DC converter I connected to pins 5V and GND (on the diagonal opposite side) of the ESP32 devkit v4 board. Between those pins I also added a 10µF capacitor to support power spikes during WiFi transmission.
+
 
 ## VE.Bus
 
@@ -180,23 +197,3 @@ The function _multiplusCommandHandling()_ should actually be an interrupt servic
 The 50Hz sync frame basically gives the pace on the bus and is probably for synchronizing all Multiplus devices in a three-phase AC system. The sync frame should never be disturbed by other frames. Data frames, like our ESS command have to be within specific time slots between two sync frames. This can be seen when sniffing the bus with a logic analyzer. As we are currently executing this function from the main loop whenever we have time, we're evaluating the sync command behind schedule, undefined in time. Thus when we send out our ESS command as reaction on the sync frame, it's luck if the timing was right or wrong. That's why I experience about 1% to 2% of failed ESS commands that never get acknowledged.
 
 As we re-send on a fail, this is currently not a huge problem. However, with this design flaw I would never risk controlling a three-phase Multiplus system, even though this would probably be possible. Of course I tried putting this function into an ISR when writing this code. But probably due to lack of my programming skills this never worked. The code was crashing whenever I had a Serial1.xxxx() function within the ISR. If somebody would be able to put this code into an ISR, this would be an enormous improvement and would surely also make the failed ESS commands disappear.
-
-### Power ESP32 control circuit from Multiplus standby power
-
-Below is the full pinout of the VE.Bus RJ45 connector:
-   * pin 1 = n.c./VEN_Gnd
-   * pin 2 = Vin+
-   * pin 3 = MK3_Gnd
-   * pin 4 = A = D+
-   * pin 5 = B = D-
-   * pin 6 = Standby (always +3.30V, independent if Multiplus is turned on or off)
-   * pin 7 = PanelDetect (+3.30V when Multiplus is turned off. Increases to +3.93V when Multiplus is turned on. 
-Stays always on +3.9V, also during communication with MK3 interface.)
-   * pin 8 = n.c.
-
-I did not measure yet how much power the Standby pin can actually deliver. If it is >200mA, one could imagine using it to power our full ESP32 control circuit. Of course this would require that all components are 3.3V capable. The SN65HVD230 CAN transceiver, if it is not a counterfeit part like mine, is already capable. Similar devices from TI also exist for the RS485/VE.Bus interface. Finally also a 3.3V capable display would be needed. One could switch to a modern OLED display (like AHOY/OpenDTU) or some HD44780 displays that are also working with 3.3V. But then probably a negative voltage needs to be applied on the contrast voltage pin. (I once used a AA battery for that, as is basically sources no current.)
-
-Benefits would be:
-* no level translators required anymore
-* no external power supply required anymore (also resulting in minor power savings)
-* no problem with "black start" during blackout, as all is powered from battery
