@@ -32,6 +32,16 @@ Note that currently this code only supports a single Multiplus device (single-
 phase). In the future it might be extended to also control a three-phase
 Multiplus system. If interested in this, read [here](docs/README.md#improvements).
 
+## Video
+
+Here you can see the system in action:
+
+Short explanation and view of the power meter while cancelling out 600W:
+https://www.youtube.com/watch?v=5YttD_S421Q
+
+View of the control circuit display:
+https://www.youtube.com/watch?v=WXgG3uDJ3_o
+
 ## VE.Bus
 
 For hardware details read my documentation [here](docs/README.md#max485-converter-for-vebus).
