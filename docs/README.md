@@ -50,7 +50,7 @@ Pinout on the RJ45 socket towards the Pylontech battery is as follows:
 
 ### LC Display 4x20 HD44780
 
-As I like those ASCII displays from my past, and they are easily accessible from trashed electronics, I've used one in my hardware. It's connected to the ESP32 in parallel 4-bit mode via pins RS, EN, D4..D7. The pins RW and the contrast voltage I've hardwired to Vss (Gnd). The display needs 5V. But as it only works in receive-mode (RW=0) and is able to handle the 3.3V levels correctly, I didn't use level converters.
+As I like those ASCII displays from my past, and they are easily accessible from trashed electronics, I've used one in my hardware. It's connected to the ESP32 in parallel 4-bit mode via pins RS, EN, D4..D7. The R/W pin I've hardwired to Vss (Gnd), as it only works in receive-mode (RW=0). The display needs 5V, but is able to handle 3.3V on the logic inputs correctly. So I didn't need level converters. The contrast pin Ve is connected to a 4.7k trimmer resistor with additional 10k in series to Vcc, so that it adjusts between 0V and 1.7V.
 
 For current pin assignment, please see "Constants"-section of the source code. The backlight I also connected to 5V via a 100 Ohm resistor.
 
