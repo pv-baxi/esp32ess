@@ -129,13 +129,21 @@ hw_timer_t *My_timer = NULL;
 LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 WebServer server(80);
 //Multiplus variables
+byte    masterMultiLED_LEDon = 123;             //Bits 0..7 = mains on, absorption, bulk, float, inverter on, overload, low battery, temperature
+byte    masterMultiLED_LEDblink = 234;          //(LEDon=1 && LEDblink=1) = blinking; (LEDon=0 && LEDblink=1) = blinking_inverted 
+byte    masterMultiLED_Status = 12;             //0=ok, 2=battery low
+byte    masterMultiLED_AcInputConfiguration;
+float   masterMultiLED_MinimumInputCurrentLimit;
+float   masterMultiLED_MaximumInputCurrentLimit;  //for details on MasterMultiLED frame see Victron MK2 protocol PDF
+float   masterMultiLED_ActualInputCurrentLimit;
+byte    masterMultiLED_SwitchRegister;
 float   multiplusTemp = 11.1;
 float   multiplusDcCurrent = -22.2;
 int16_t multiplusAh = -12345;
-byte    multiplusLEDon = 123;   //Victron MK2 manual: Bits 0..7: mains on, absorption, bulk, float, inverter on, overload, low battery, temperature
-byte    multiplusLEDblink = 234;//(LEDon=1 && LEDblink=1)=blinking ; (LEDon=0 && LEDblink=1)=blinking_inverted 
-byte    multiplusStatus41 = 12;//status from the mode frame 0x41: 0=ok, 2=battery low
-byte    multiplusStatus80 = 23;//status from the charger/inverter frame 0x80: 0=ok, 2=battery low
+byte    multiplusStatus80 = 23;                 //status from the charger/inverter frame 0x80: 0=ok, 2=battery low
+bool    multiplusDcLevelAllowsInverting = false;
+
+
 
 
 
@@ -426,75 +434,69 @@ void convertFrameToHEXstring(char *inbuf, char *outstr, int length)
 bool decodeVEbusFrame(char *frame, int len)
 {
   bool result = false;
-  if ((frame[2] == 0xFD) && (len=10) && (frame[4] == 0x55))    //If sync frame
-  {
-    result = true;  //We simply ignore known sync frames
-  }
-  if (frame[2] == 0xFE)    //If data frame:
-  {
-    //addFrameToLogfile(frame,0,len-1);
-    switch (frame[4]) {
-      case 0x80:    //80 = Condition of Charger/Inverter (Temp+Current)
-      {
-        if ((len==19) && (frame[5]==0x80) && (frame[6]==0x13) && (frame[8]==0x80) && (frame[12]==0x00)) {
-          if ((frame[11] & 0xF0) == 0x10)
-          {
-            multiplusStatus80 = frame[7];
-            int16_t t = 256*frame[10] + frame[9];
-            multiplusDcCurrent = t/10.0;
-            result = true; //known frame
-          }
-          if ((frame[11] & 0xF0) == 0x30)
-          {
-            multiplusStatus80 = frame[7];
-            int16_t t = 256*frame[10] + frame[9];
-            multiplusDcCurrent = t/10.0;
-            multiplusTemp = frame[15]/10.0;
-            result = true; //known frame
-          }
-        }
-        break;
-      }
-      case 0xE4:    //E4 = AC phase information (comes with 50Hz)
-      {
-        if (len==21) {
-          result = true; //We simply ignore this frame
-        }
-        break;
-      }
-      case 0x70:    //70 = DC capacity counter
-      {
-        if ((len==15) && (frame[5]==0x81) && (frame[6]==0x64) && (frame[7]==0x14) && (frame[8]==0xBC) && (frame[9]==0x02) && (frame[12]==0x00))
+  if ((frame[0]==0x83) && (frame[1]==0x83)) {     //Only accept frames from single Multiplus
+    if ((frame[2] == 0xFD) && (len=10) && (frame[4] == 0x55))    //If sync frame
+    {
+      result = true;  //We simply ignore known sync frames
+    }
+    if (frame[2] == 0xFE)    //If data frame:
+    {
+      switch (frame[4]) {
+        case 0x80:    //80 = Condition of Charger/Inverter (Temp+Current)
         {
-          multiplusAh = 256*frame[11] + frame[10];  //maybe value is also 24bit including frame[12]?
-          result = true; //known frame
+          if ((len==19) && (frame[5]==0x80) && ((frame[6]&0xFE)==0x12) && (frame[8]==0x80) && ((frame[11]&0x10)==0x10) && (frame[12]==0x00))
+          {
+            result = true; //known frame
+            multiplusStatus80 = frame[7];
+            multiplusDcLevelAllowsInverting = (frame[6] & 0x01);
+            int16_t t = 256*frame[10] + frame[9];
+            multiplusDcCurrent = t/10.0;
+            if ((frame[11] & 0xF0) == 0x30) multiplusTemp = frame[15]/10.0;
+          }
+          break;
         }
-        break;
-      }
-      case 0x00:
-      {
-        if ((len == 9) && (frbuf1[5] == 0xE6) && (frbuf1[6] == 0x87)) {
-          result = true; //We ignore our ACK frame for now... TBD
+        case 0xE4:    //E4 = AC phase information (comes with 50Hz)
+        {
+          if (len==21) {
+            result = true; //We simply ignore this frame
+          }
+          break;
         }
-        break;
-      }
-      case 0x41:    //41 = Multiplus mode
-      {
-        if ((len==19) && (frame[5]==0x10)  && (frame[9]==0x10)  && (frame[10]==0x00) && (frame[11]==0x00) && (frame[12]==0xF4) &&
-                         (frame[13]==0x01) && (frame[14]==0x5E) && (frame[15]==0x01) && (frame[16]==0x77)) {
-          multiplusLEDon = frame[6];
-          multiplusLEDblink = frame[7];
-          multiplusStatus41 = frame[8];
-          printFrame[0] = frame[5];
-          printFrame[1] = frame[6];
-          printFrame[2] = frame[7];
-          printFrame[3] = frame[8];
-          printFrame[4] = frame[9];
-          printFrame[5] = frame[10];
-          printFrame[6] = frame[11];
-          result = true; //mark as known frame
+        case 0x70:    //70 = DC capacity counter
+        {
+          if ((len==15) && (frame[5]==0x81) && (frame[6]==0x64) && (frame[7]==0x14) && (frame[8]==0xBC) && (frame[9]==0x02) && (frame[12]==0x00))
+          {
+            multiplusAh = 256*frame[11] + frame[10];  //maybe value is also 24bit including frame[12]?
+            result = true; //known frame
+          }
+          break;
         }
-        break;
+        case 0x00:
+        {
+          if ((len == 9) && (frbuf1[5] == 0xE6) && (frbuf1[6] == 0x87)) {
+            result = true; //We ignore our ACK frame for now... TBD
+          }
+          break;
+        }
+        case 0x41:    //41 = MasterMultiLED frame
+        {
+          if ((len==19) && (frame[5]==0x10))    //frame[5] is the only unknown byte in this frame, rest is documented in Victron MK2 manual
+          {
+            masterMultiLED_LEDon = frame[6];
+            masterMultiLED_LEDblink = frame[7];
+            masterMultiLED_Status = frame[8];
+            masterMultiLED_AcInputConfiguration = frame[9];
+            int16_t t = 256*frame[11] + frame[10];
+            masterMultiLED_MinimumInputCurrentLimit = t/10.0;
+            t = 256*frame[13] + frame[12];
+            masterMultiLED_MaximumInputCurrentLimit = t/10.0;
+            t = 256*frame[15] + frame[14];
+            masterMultiLED_ActualInputCurrentLimit = t/10.0;
+            masterMultiLED_SwitchRegister = frame[16];
+            result = true; //mark as known frame
+          }
+          break;
+        }
       }
     }
   }
@@ -1051,7 +1053,7 @@ void updateDisplays()
     lcd.print("A  ");
     //Print Multiplus status
     lcd.setCursor(14, 0);
-    if (multiplusStatus41==multiplusStatus80) lcd.print(multiplusStatus41); else lcd.print("??");
+    if (masterMultiLED_Status==multiplusStatus80) lcd.print(masterMultiLED_Status); else lcd.print("??");
     lcd.print("  ");
     //Print battery charge level (SOC)
     lcd.setCursor(17, 0);
@@ -1104,57 +1106,57 @@ void updateDisplays()
 void handleRoot() {
   //mains on:
   String strMainsOn = "";
-  bool on = (multiplusLEDon & 0x01);
-  bool blink = (multiplusLEDblink & 0x01);
+  bool on = (masterMultiLED_LEDon & 0x01);
+  bool blink = (masterMultiLED_LEDblink & 0x01);
   if (on && !blink) strMainsOn = "mains on";
   if (on && blink) strMainsOn = "<i>mains on</i>";
   if (!on && blink) strMainsOn = "<i>mains on</i>";
   //absorption:
   String strAbsorption = "";
-  on = (multiplusLEDon & 0x02);
-  blink = (multiplusLEDblink & 0x02);
+  on = (masterMultiLED_LEDon & 0x02);
+  blink = (masterMultiLED_LEDblink & 0x02);
   if (on && !blink) strAbsorption = "absorption";
   if (on && blink) strAbsorption = "<i>absorption</i>";
   if (!on && blink) strAbsorption = "<i>absorption</i>";
   //bulk:
   String strBulk = "";
-  on = (multiplusLEDon & 0x04);
-  blink = (multiplusLEDblink & 0x04);
+  on = (masterMultiLED_LEDon & 0x04);
+  blink = (masterMultiLED_LEDblink & 0x04);
   if (on && !blink) strBulk = "bulk";
   if (on && blink) strBulk = "<i>bulk</i>";
   if (!on && blink) strBulk = "<i>bulk</i>";
   //float:
   String strFloat = "";
-  on = (multiplusLEDon & 0x08);
-  blink = (multiplusLEDblink & 0x08);
+  on = (masterMultiLED_LEDon & 0x08);
+  blink = (masterMultiLED_LEDblink & 0x08);
   if (on && !blink) strFloat = "float";
   if (on && blink) strFloat = "<i>float</i>";
   if (!on && blink) strFloat = "<i>float</i>";
   //inverter on:
   String strInverterOn = "";
-  on = (multiplusLEDon & 0x10);
-  blink = (multiplusLEDblink & 0x10);
+  on = (masterMultiLED_LEDon & 0x10);
+  blink = (masterMultiLED_LEDblink & 0x10);
   if (on && !blink) strInverterOn = "inverter on";
   if (on && blink) strInverterOn = "<i>inverter on</i>";
   if (!on && blink) strInverterOn = "<i>inverter on</i>";
   //overload:
   String strOverload = "";
-  on = (multiplusLEDon & 0x20);
-  blink = (multiplusLEDblink & 0x20);
+  on = (masterMultiLED_LEDon & 0x20);
+  blink = (masterMultiLED_LEDblink & 0x20);
   if (on && !blink) strOverload = "overload";
   if (on && blink) strOverload = "<i>overload</i>";
   if (!on && blink) strOverload = "<i>overload</i>";
   //low battery:
   String strLowBattery = "";
-  on = (multiplusLEDon & 0x40);
-  blink = (multiplusLEDblink & 0x40);
+  on = (masterMultiLED_LEDon & 0x40);
+  blink = (masterMultiLED_LEDblink & 0x40);
   if (on && !blink) strLowBattery = "low battery";
   if (on && blink) strLowBattery = "<i>low battery</i>";
   if (!on && blink) strLowBattery = "<i>low battery</i>";
   //temperature:
   String strTemperature = "";
-  on = (multiplusLEDon & 0x80);
-  blink = (multiplusLEDblink & 0x80);
+  on = (masterMultiLED_LEDon & 0x80);
+  blink = (masterMultiLED_LEDblink & 0x80);
   if (on && !blink) strTemperature = "temperature";
   if (on && blink) strTemperature = "<i>temperature</i>";
   if (!on && blink) strTemperature = "<i>temperature</i>";
@@ -1181,8 +1183,11 @@ void handleRoot() {
   webpage += "Multiplus DC current: "+String(multiplusDcCurrent,1)+"A ("+String(multiplusDcCurrent*NOM_VOLT,0)+"W)<br>";
   webpage += "Multiplus capacity in-out: "+String(multiplusAh)+"Ah ("+String(multiplusAh*NOM_VOLT/1000.0,1)+"kWh)<br>";
   webpage += "<br>";
-  webpage += "Multiplus Status 41: "+String(multiplusStatus41)+"<br>";
-  webpage += "Multiplus Status 80: "+String(multiplusStatus80)+"<br>";
+  webpage += "MasterMultiLED Status: "+String(masterMultiLED_Status)+"<br>";
+  webpage += "Charger/Inverter Status: "+String(multiplusStatus80)+"<br>";
+  webpage += "DC voltage allows inverting: "+String(multiplusDcLevelAllowsInverting)+"<br>";
+  webpage += "AC input current limit: "+String(masterMultiLED_ActualInputCurrentLimit,1)+"A<br>";
+  webpage += "MasterMultiLED switch value: 0x"+String(masterMultiLED_SwitchRegister,HEX)+"<br>";
   webpage += "<br>";
   webpage += "Failed commands: "+String(cmdFailCnt)+"/"+String(essCmdCounter)+"<br>";
   webpage += "<br>";
