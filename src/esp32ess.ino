@@ -129,13 +129,13 @@ hw_timer_t *My_timer = NULL;
 LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 WebServer server(80);
 //Multiplus variables
-float multiplusTemp = 11.1;
-float multiplusDcCurrent = -22.2;
+float   multiplusTemp = 11.1;
+float   multiplusDcCurrent = -22.2;
 int16_t multiplusAh = -12345;
-bool mainsOn = false;
-bool bulk = false;
-bool inverterOn = false;
-
+byte    multiplusLEDon = 123;   //Victron MK2 manual: Bits 0..7: mains on, absorption, bulk, float, inverter on, overload, low battery, temperature
+byte    multiplusLEDblink = 234;//(LEDon=1 && LEDblink=1)=blinking ; (LEDon=0 && LEDblink=1)=blinking_inverted 
+byte    multiplusStatus41 = 12;//status from the mode frame 0x41: 0=ok, 2=battery low
+byte    multiplusStatus80 = 23;//status from the charger/inverter frame 0x80: 0=ok, 2=battery low
 
 
 
@@ -436,15 +436,17 @@ bool decodeVEbusFrame(char *frame, int len)
     switch (frame[4]) {
       case 0x80:    //80 = Condition of Charger/Inverter (Temp+Current)
       {
-        if ((len==19) && (frame[5]==0x80) && (frame[6]==0x13) && (frame[7]==0x00) && (frame[8]==0x80) && (frame[12]==0x00)) {
+        if ((len==19) && (frame[5]==0x80) && (frame[6]==0x13) && (frame[8]==0x80) && (frame[12]==0x00)) {
           if ((frame[11] & 0xF0) == 0x10)
           {
+            multiplusStatus80 = frame[7];
             int16_t t = 256*frame[10] + frame[9];
             multiplusDcCurrent = t/10.0;
             result = true; //known frame
           }
           if ((frame[11] & 0xF0) == 0x30)
           {
+            multiplusStatus80 = frame[7];
             int16_t t = 256*frame[10] + frame[9];
             multiplusDcCurrent = t/10.0;
             multiplusTemp = frame[15]/10.0;
@@ -478,10 +480,11 @@ bool decodeVEbusFrame(char *frame, int len)
       }
       case 0x41:    //41 = Multiplus mode
       {
-        if ((len==19) && (frame[12]==0xF4) && (frame[13]==0x01) && (frame[14]==0x5E) && (frame[15]==0x01) && (frame[16]==0x77)) {
-          mainsOn = ((frame[6] & 0x01) == 0x01);
-          bulk = ((frame[6] & 0x04) == 0x04);
-          inverterOn = ((frame[7] & 0x10) == 0x10);
+        if ((len==19) && (frame[5]==0x10)  && (frame[9]==0x10)  && (frame[10]==0x00) && (frame[11]==0x00) && (frame[12]==0xF4) &&
+                         (frame[13]==0x01) && (frame[14]==0x5E) && (frame[15]==0x01) && (frame[16]==0x77)) {
+          multiplusLEDon = frame[6];
+          multiplusLEDblink = frame[7];
+          multiplusStatus41 = frame[8];
           printFrame[0] = frame[5];
           printFrame[1] = frame[6];
           printFrame[2] = frame[7];
@@ -1037,30 +1040,26 @@ void updateDisplays()
     //Forward power meter pulse to red LED
     digitalWrite(RED_LED, IRpinDisplay);    //Write the remembered state of the IR input pin to red LED
     IRpinDisplay = LOW;               //make that LED will turn off next Displaying-Cycle
-    //Print desired frame
-    lcd.setCursor(0, 0);
-    char temp[4];
-    for (int i=0;i<7;i++)
-    {
-      sprintf(temp,"%02X ",printFrame[i]);
-      lcd.print(temp);
-    }
     //Print temperature
-    lcd.setCursor(0, 1);
+    lcd.setCursor(0, 0);
     lcd.print(multiplusTemp,1);
     lcd.print(char(0xDF));
     lcd.print("C  ");
     //Print DC current
-    lcd.setCursor(7, 1);
+    lcd.setCursor(7, 0);
     lcd.print(multiplusDcCurrent,1);
     lcd.print("A  ");
+    //Print Multiplus status
+    lcd.setCursor(14, 0);
+    if (multiplusStatus41==multiplusStatus80) lcd.print(multiplusStatus41); else lcd.print("??");
+    lcd.print("  ");
     //Print battery charge level (SOC)
-    lcd.setCursor(17, 1);
+    lcd.setCursor(17, 0);
     lcd.print("  %");        //only 2 digits as we hope to never reach 100% due to failure
-    lcd.setCursor(17, 1);
+    lcd.setCursor(17, 0);
     if ((soc >= 0) && (soc <= 100)) lcd.print(soc); else lcd.print("--");
     //Print failed + total ESS commands + settling
-    lcd.setCursor(0, 2);
+    lcd.setCursor(0, 1);
     lcd.print(cmdFailCnt);
     lcd.print("/");
     lcd.print(essCmdCounter);  
@@ -1068,23 +1067,31 @@ void updateDisplays()
     lcd.print(essCnt);
     lcd.print("  ");
         //Print if logged into WiFi or not
-    lcd.setCursor(17, 2);
+    lcd.setCursor(17, 1);
     if (WiFi.status() == WL_CONNECTED) lcd.print("W"); else lcd.print("-");
     //Print Special Mode indication (1-byte ASCII)
-    lcd.setCursor(19, 2);
+    lcd.setCursor(19, 1);
     lcd.print(switchMode);      //print switchMode number as ASCII character
     //Print current meter value
-    lcd.setCursor(0, 3);
+    lcd.setCursor(0, 2);
     lcd.print("Mtr:      ");
-    lcd.setCursor(4, 3);
+    lcd.setCursor(4, 2);
     lcd.print(meterPower);
     lcd.print("W");
     //Print current Multiplus ESS power value
-    lcd.setCursor(10, 3);
+    lcd.setCursor(10, 2);
     lcd.print("ESS:      ");
-    lcd.setCursor(14, 3);
+    lcd.setCursor(14, 2);
     lcd.print(essPower);
     lcd.print("W");
+    // //Print desired frame
+    // lcd.setCursor(0, 3);
+    // char temp[4];
+    // for (int i=0;i<7;i++)
+    // {
+    //   sprintf(temp,"%02X ",printFrame[i]);
+    //   lcd.print(temp);
+    // }
 }
 
 
@@ -1095,18 +1102,62 @@ void updateDisplays()
 // adress of the ESP32 in a webbrowser within the local network.
 // ===========================================================================
 void handleRoot() {
-  //prepare Multiplus strings
+  //mains on:
   String strMainsOn = "";
-  String strBulk = "";
+  bool on = (multiplusLEDon & 0x01);
+  bool blink = (multiplusLEDblink & 0x01);
+  if (on && !blink) strMainsOn = "mains on";
+  if (on && blink) strMainsOn = "<i>mains on</i>";
+  if (!on && blink) strMainsOn = "<i>mains on</i>";
+  //absorption:
   String strAbsorption = "";
+  on = (multiplusLEDon & 0x02);
+  blink = (multiplusLEDblink & 0x02);
+  if (on && !blink) strAbsorption = "absorption";
+  if (on && blink) strAbsorption = "<i>absorption</i>";
+  if (!on && blink) strAbsorption = "<i>absorption</i>";
+  //bulk:
+  String strBulk = "";
+  on = (multiplusLEDon & 0x04);
+  blink = (multiplusLEDblink & 0x04);
+  if (on && !blink) strBulk = "bulk";
+  if (on && blink) strBulk = "<i>bulk</i>";
+  if (!on && blink) strBulk = "<i>bulk</i>";
+  //float:
   String strFloat = "";
+  on = (multiplusLEDon & 0x08);
+  blink = (multiplusLEDblink & 0x08);
+  if (on && !blink) strFloat = "float";
+  if (on && blink) strFloat = "<i>float</i>";
+  if (!on && blink) strFloat = "<i>float</i>";
+  //inverter on:
   String strInverterOn = "";
+  on = (multiplusLEDon & 0x10);
+  blink = (multiplusLEDblink & 0x10);
+  if (on && !blink) strInverterOn = "inverter on";
+  if (on && blink) strInverterOn = "<i>inverter on</i>";
+  if (!on && blink) strInverterOn = "<i>inverter on</i>";
+  //overload:
   String strOverload = "";
+  on = (multiplusLEDon & 0x20);
+  blink = (multiplusLEDblink & 0x20);
+  if (on && !blink) strOverload = "overload";
+  if (on && blink) strOverload = "<i>overload</i>";
+  if (!on && blink) strOverload = "<i>overload</i>";
+  //low battery:
   String strLowBattery = "";
+  on = (multiplusLEDon & 0x40);
+  blink = (multiplusLEDblink & 0x40);
+  if (on && !blink) strLowBattery = "low battery";
+  if (on && blink) strLowBattery = "<i>low battery</i>";
+  if (!on && blink) strLowBattery = "<i>low battery</i>";
+  //temperature:
   String strTemperature = "";
-  if (mainsOn) strMainsOn = "mains on";
-  if (bulk) strBulk = "bulk";
-  if (inverterOn) strInverterOn = "inverter on";
+  on = (multiplusLEDon & 0x80);
+  blink = (multiplusLEDblink & 0x80);
+  if (on && !blink) strTemperature = "temperature";
+  if (on && blink) strTemperature = "<i>temperature</i>";
+  if (!on && blink) strTemperature = "<i>temperature</i>";
   //build webpage
   String webpage = "<!DOCTYPE html><html><head><title>ESP32 Multiplus ESS</title></head><body><font size=\"7\">";  //font size 7 is largest allowed
   webpage += "<p><b>ESP32 Multiplus ESS</b></p>";
@@ -1129,6 +1180,9 @@ void handleRoot() {
   webpage += "Multiplus Temperature: "+String(multiplusTemp,1)+"&deg;C<br>";
   webpage += "Multiplus DC current: "+String(multiplusDcCurrent,1)+"A ("+String(multiplusDcCurrent*NOM_VOLT,0)+"W)<br>";
   webpage += "Multiplus capacity in-out: "+String(multiplusAh)+"Ah ("+String(multiplusAh*NOM_VOLT/1000.0,1)+"kWh)<br>";
+  webpage += "<br>";
+  webpage += "Multiplus Status 41: "+String(multiplusStatus41)+"<br>";
+  webpage += "Multiplus Status 80: "+String(multiplusStatus80)+"<br>";
   webpage += "<br>";
   webpage += "Failed commands: "+String(cmdFailCnt)+"/"+String(essCmdCounter)+"<br>";
   webpage += "<br>";
