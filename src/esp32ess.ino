@@ -75,6 +75,7 @@ const int LOGFILE_SIZE = 65510;         //Maximum text buffer that can be sent v
 const int SOC_WATCHDOG_CYCLES = 2.5*CPS;//time after which Multiplus is turned off in case there was no SOC received from battery (2.5 seconds)
 const char SWITCH_MODE_DEFAULT = 48;    //Default switch mode to start with. For mode numbers see function switchSpecialModes()
 const int SWITCH_MODE_DURATION = 60*60*CPS; //automatically exit specific the switch modes after 60 minutes
+const float NOM_VOLT = 48.0;            //Battery nominal voltage (for Watt/Wh estimation)
 
 
 // #############################################################################
@@ -93,10 +94,11 @@ boolean lowerEmergencySoc = false;    //allow/disallow Multiplus operation with 
 //other variables:
 int displayCounter = 0;             //counts how often LC display was updated
 char rxbuf[256];                    //used to store last serial bytes received from Multiplus, only a part of a frame
-char frbuf[256];                    //assembles one complete frame received by Multiplus
+char frbuf0[256];                    //assembles one complete frame received by Multiplus
+char frbuf1[256];                   //frame without replacement
 char txbuf1[64];                    //buffer for assembling bare command towards Multiplus (without replacements or checksum)
 char txbuf2[64];                    //Multiplus output buffer containing the final command towards Multiplus, including replacements and checksum
-//char str[3*256+1];                //Buffer to temporarily store commands from/to Multiplus in HEX format and send it to SerialMonitor for debugging. +1 for being able to terminate our string with zero
+//char str[3*128+1];                //Buffer to temporarily store commands from/to Multiplus in HEX format and send it to SerialMonitor for debugging. +1 for being able to terminate our string with zero
 byte frp = 0;                       //Pointer into Multiplus framebuffer frbuf[] to store received frames.
 byte frameNr = 0;                   //Last frame number received from Multiplus. Own command has be be sent with frameNr+1, otherwise it will be ignored by Multiplus.
 int essCmdCounter = 0;              //Counts the number of ESS commands sent to Multiplus, including the failed ones.
@@ -121,10 +123,21 @@ int debugmin = 999999;              //used to log minimum battery level
 int debugmax = -999999;             //used to log maximum battery level
 int8_t soc = 0;                     //State Of Charge = received battery charge level via CAN bus (0..100%)
 boolean newMeterValue = false;      //indicating to various functions that we got a new power meter measurement result
+char printFrame[16];                //part of a frame, to be printed on LCD
 //Classes
 hw_timer_t *My_timer = NULL;
 LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 WebServer server(80);
+//Multiplus variables
+float multiplusTemp = 11.1;
+float multiplusDcCurrent = -22.2;
+int16_t multiplusAh = -12345;
+bool mainsOn = false;
+bool bulk = false;
+bool inverterOn = false;
+
+
+
 
 
 // ##########################################################################################
@@ -239,6 +252,34 @@ void addToLogfile(String s)
   }
 }
 
+void addFrameToLogfile(char *frame, int startbyte, int endbyte)
+{
+  if (!stopWritingLogfile || (logfileCounter < logfileCounterStop))
+  {
+    logfile[p_logfile++]='\n';
+    if (p_logfile==LOGFILE_SIZE) p_logfile=0;   //wrap pointer around at end of buffer
+    logfileCounter++;   //increase logfile size counter
+    for (int i=startbyte; i<=endbyte; i++)
+    {
+      char c = frame[i];
+      char n = (c >> 4) | 48;
+      if (n > 57) n = n+7;
+      logfile[p_logfile++]=n;
+      if (p_logfile==LOGFILE_SIZE) p_logfile=0;   //wrap pointer around at end of buffer
+      logfileCounter++;   //increase logfile size counter
+      n = (c & 0x0F) | 48;
+      if (n > 57) n = n+7;
+      logfile[p_logfile++]=n;
+      if (p_logfile==LOGFILE_SIZE) p_logfile=0;   //wrap pointer around at end of buffer
+      logfileCounter++;   //increase logfile size counter
+      logfile[p_logfile++]=' ';
+      if (p_logfile==LOGFILE_SIZE) p_logfile=0;   //wrap pointer around at end of buffer
+      logfileCounter++;   //increase logfile size counter
+    }
+  }
+}
+
+
 
 // ===========================================================================
 //                      Assemble basic VE.Bus command
@@ -302,6 +343,31 @@ int commandReplaceFAtoFF(char *outbuf, char *inbuf, int inlength)
   return j;   //new length of output frame
 }
 
+
+int destuffFAtoFF(char *outbuf, char *inbuf, int inlength)
+{
+  int j=0;
+  for (int i = 0; i < 4; i++) outbuf[j++] = inbuf[i];
+  for (int i = 4; i < inlength; i++)
+  {
+    byte c = inbuf[i];
+    if (c == 0xFA)
+    {
+      i++;
+      c = inbuf[i];
+      if (c == 0xFF)    //if 0xFA is the checksum, leave the FA and following FF (end of frame) in as it was.
+      {                 //The rule comes from the fact that for checking the checksum just the sum of all bytes must be zero. That's why the 0x00 behind the 0xFA is not appended as an exception.
+        outbuf[j++] = 0xFA;
+        outbuf[j++] = c;
+      }
+      else outbuf[j++] = c + 0x80;
+    }
+    else outbuf[j++] = c;    //no replacement
+  }  
+  return j;   //new length of output frame
+}
+
+
 // ===========================================================================
 //                   Append checksum and 0xFF to command
 // ---------------------------------------------------------------------------
@@ -319,7 +385,7 @@ int appendChecksum(char *buf, int inlength)
     cs -= buf[i];
   }
   j = inlength;
-  if (cs >= 0xFA)
+  if (cs >= 0xFB)   //EXCEPTION: Only replace starting from 0xFB, as inserting {0xFA 0x00} wouldn't make sense as 0x00 doesn't affect the checksum!
   {
     buf[j++] = 0xFA;
     buf[j++] = (cs-0xFA);
@@ -356,6 +422,82 @@ void convertFrameToHEXstring(char *inbuf, char *outstr, int length)
         outstr[j] = 0;
 }
 
+//true if frame was known, false if unknown
+bool decodeVEbusFrame(char *frame, int len)
+{
+  bool result = false;
+  if ((frame[2] == 0xFD) && (len=10) && (frame[4] == 0x55))    //If sync frame
+  {
+    result = true;  //We simply ignore known sync frames
+  }
+  if (frame[2] == 0xFE)    //If data frame:
+  {
+    //addFrameToLogfile(frame,0,len-1);
+    switch (frame[4]) {
+      case 0x80:    //80 = Condition of Charger/Inverter (Temp+Current)
+      {
+        if ((len==19) && (frame[5]==0x80) && (frame[6]==0x13) && (frame[7]==0x00) && (frame[8]==0x80) && (frame[12]==0x00)) {
+          if ((frame[11] & 0xF0) == 0x10)
+          {
+            int16_t t = 256*frame[10] + frame[9];
+            multiplusDcCurrent = t/10.0;
+            result = true; //known frame
+          }
+          if ((frame[11] & 0xF0) == 0x30)
+          {
+            int16_t t = 256*frame[10] + frame[9];
+            multiplusDcCurrent = t/10.0;
+            multiplusTemp = frame[15]/10.0;
+            result = true; //known frame
+          }
+        }
+        break;
+      }
+      case 0xE4:    //E4 = AC phase information (comes with 50Hz)
+      {
+        if (len==21) {
+          result = true; //We simply ignore this frame
+        }
+        break;
+      }
+      case 0x70:    //70 = DC capacity counter
+      {
+        if ((len==15) && (frame[5]==0x81) && (frame[6]==0x64) && (frame[7]==0x14) && (frame[8]==0xBC) && (frame[9]==0x02) && (frame[12]==0x00))
+        {
+          multiplusAh = 256*frame[11] + frame[10];  //maybe value is also 24bit including frame[12]?
+          result = true; //known frame
+        }
+        break;
+      }
+      case 0x00:
+      {
+        if ((len == 9) && (frbuf1[5] == 0xE6) && (frbuf1[6] == 0x87)) {
+          result = true; //We ignore our ACK frame for now... TBD
+        }
+        break;
+      }
+      case 0x41:    //41 = Multiplus mode
+      {
+        if ((len==19) && (frame[12]==0xF4) && (frame[13]==0x01) && (frame[14]==0x5E) && (frame[15]==0x01) && (frame[16]==0x77)) {
+          mainsOn = ((frame[6] & 0x01) == 0x01);
+          bulk = ((frame[6] & 0x04) == 0x04);
+          inverterOn = ((frame[7] & 0x10) == 0x10);
+          printFrame[0] = frame[5];
+          printFrame[1] = frame[6];
+          printFrame[2] = frame[7];
+          printFrame[3] = frame[8];
+          printFrame[4] = frame[9];
+          printFrame[5] = frame[10];
+          printFrame[6] = frame[11];
+          result = true; //mark as known frame
+        }
+        break;
+      }
+    }
+  }
+  return result;
+}
+
 // ===========================================================================
 //                     VE.Bus to Multiplus command handling
 // ---------------------------------------------------------------------------
@@ -384,16 +526,23 @@ void multiplusCommandHandling()
     for (int n=0; n<nr; n++)          //loop over all new bytes
     {
       char c = rxbuf[n];       //read one byte
-      frbuf[frp++] = c;   //store into framebuffer
+      frbuf0[frp++] = c;   //store into framebuffer
       if (c==0xFF)        //in case current byte was EndOfFrame, interprete frame
       {
         //convert content of framebuffer to HEX string and send to SerialMonitor
         //convertFrameToHEXstring(frbuf, str, frp);
         //Serial.println(str);
-        //continue interpreting frame:
-        if ((frbuf[2] == 0xFD) && (frbuf[4] == 0x55))  //if it was a sync frame:
+        //destuff frame:
+        int frlen = destuffFAtoFF(frbuf1, frbuf0, frp);
+        if (not decodeVEbusFrame(frbuf1, frlen))
         {
-          frameNr = frbuf[3];
+          addFrameToLogfile(frbuf1,0,frlen-1);
+          //if ((frbuf1[4]==0xE4) && (frlen==20)); addFrameToLogfile(frbuf0,0,frp-1);   //for debugging
+        }
+        //continue interpreting frame:
+        if ((frbuf1[2] == 0xFD) && (frbuf1[4] == 0x55))  //if it was a sync frame:
+        {
+          frameNr = frbuf1[3];
           if ((essCmdSendState == 2) && (n == nr-1))       //if new ESSpower should be written and 0xFF (end of frame) was last received character:
           {
             //send ESS command
@@ -413,9 +562,9 @@ void multiplusCommandHandling()
             essCmdSendState = 1;        //wait for confirmation if command was successful
           }
         }
-        if ((frbuf[0] == 0x83) && (frbuf[1] == 0x83) && (frbuf[2] == 0xFE) && (frbuf[4] == 0x00) && (frbuf[5] == 0xE6) && (frbuf[6] == 0x87))  //if it is a (positive) response to an ESS write
+        if ((frbuf1[0] == 0x83) && (frbuf1[1] == 0x83) && (frbuf1[2] == 0xFE) && (frbuf1[4] == 0x00) && (frbuf1[5] == 0xE6) && (frbuf1[6] == 0x87))  //if it is a (positive) response to an ESS write
         {
-          //convertFrameToHEXstring(frbuf, str, frp);
+          //convertFrameToHEXstring(frbuf, str, frlen);
           //addToLogfile(str);
           //addToLogfile("\n");
           if ((essCmdSendState==1) && (cmdAckCnt > 0))    //if ACK was received in time
@@ -888,33 +1037,39 @@ void updateDisplays()
     //Forward power meter pulse to red LED
     digitalWrite(RED_LED, IRpinDisplay);    //Write the remembered state of the IR input pin to red LED
     IRpinDisplay = LOW;               //make that LED will turn off next Displaying-Cycle
-    //Print VEbus frame nr to display:
+    //Print desired frame
     lcd.setCursor(0, 0);
-    lcd.print("VEbus: ");
-    lcd.print(frameNr);
-    lcd.print(" ");
-    //Print simple counter, increased every time this code is executed:
-    lcd.setCursor(11, 0);
-    lcd.print(displayCounter++);
-    //Print nr. of ESS commands, and the failed ones which had to be resent
+    char temp[4];
+    for (int i=0;i<7;i++)
+    {
+      sprintf(temp,"%02X ",printFrame[i]);
+      lcd.print(temp);
+    }
+    //Print temperature
     lcd.setCursor(0, 1);
-    lcd.print("Fail: ");
-    lcd.print(cmdFailCnt);
-    lcd.print("/");
-    lcd.print(essCmdCounter);
+    lcd.print(multiplusTemp,1);
+    lcd.print(char(0xDF));
+    lcd.print("C  ");
+    //Print DC current
+    lcd.setCursor(7, 1);
+    lcd.print(multiplusDcCurrent,1);
+    lcd.print("A  ");
     //Print battery charge level (SOC)
     lcd.setCursor(17, 1);
     lcd.print("  %");        //only 2 digits as we hope to never reach 100% due to failure
     lcd.setCursor(17, 1);
     if ((soc >= 0) && (soc <= 100)) lcd.print(soc); else lcd.print("--");
-    //Print ESS settlement timer value
+    //Print failed + total ESS commands + settling
     lcd.setCursor(0, 2);
-    lcd.print("Settle:        ");  
-    lcd.setCursor(7, 2);
+    lcd.print(cmdFailCnt);
+    lcd.print("/");
+    lcd.print(essCmdCounter);  
+    lcd.print("/");
     lcd.print(essCnt);
-    //Print if logged into WiFi or not
-    lcd.setCursor(14, 2);
-    if (WiFi.status() == WL_CONNECTED) lcd.print("WiFi"); else lcd.print("----");
+    lcd.print("  ");
+        //Print if logged into WiFi or not
+    lcd.setCursor(17, 2);
+    if (WiFi.status() == WL_CONNECTED) lcd.print("W"); else lcd.print("-");
     //Print Special Mode indication (1-byte ASCII)
     lcd.setCursor(19, 2);
     lcd.print(switchMode);      //print switchMode number as ASCII character
@@ -940,6 +1095,19 @@ void updateDisplays()
 // adress of the ESP32 in a webbrowser within the local network.
 // ===========================================================================
 void handleRoot() {
+  //prepare Multiplus strings
+  String strMainsOn = "";
+  String strBulk = "";
+  String strAbsorption = "";
+  String strFloat = "";
+  String strInverterOn = "";
+  String strOverload = "";
+  String strLowBattery = "";
+  String strTemperature = "";
+  if (mainsOn) strMainsOn = "mains on";
+  if (bulk) strBulk = "bulk";
+  if (inverterOn) strInverterOn = "inverter on";
+  //build webpage
   String webpage = "<!DOCTYPE html><html><head><title>ESP32 Multiplus ESS</title></head><body><font size=\"7\">";  //font size 7 is largest allowed
   webpage += "<p><b>ESP32 Multiplus ESS</b></p>";
   if ((soc >= 0) && (soc <= 100)) {   //if SOC wihin valid range, show it as number on webpage
@@ -949,6 +1117,18 @@ void handleRoot() {
   }
   webpage += "PowerMeter: "+String(meterPower)+"W<br>";
   webpage += "ESS power:  "+String(essPower)+"W<br>";
+  webpage += "<br>";
+  webpage += "<table>";
+  webpage += "<tr><th>charger</th><th>inverter</th></tr>";
+  webpage += "<tr><td>&nbsp;&nbsp;&nbsp;"+strMainsOn+"</td><td>&nbsp;&nbsp;&nbsp;"+strInverterOn+"</td></tr>";
+  webpage += "<tr><td>&nbsp;&nbsp;&nbsp;"+strBulk+"</td><td>&nbsp;&nbsp;&nbsp;"+strOverload+"</td></tr>";
+  webpage += "<tr><td>&nbsp;&nbsp;&nbsp;"+strAbsorption+"</td><td>&nbsp;&nbsp;&nbsp;"+strLowBattery+"</td></tr>";
+  webpage += "<tr><td>&nbsp;&nbsp;&nbsp;"+strFloat+"</td><td>&nbsp;&nbsp;&nbsp;"+strTemperature+"</td></tr>";
+  webpage += "</table>";
+  webpage += "<br>";
+  webpage += "Multiplus Temperature: "+String(multiplusTemp,1)+"&deg;C<br>";
+  webpage += "Multiplus DC current: "+String(multiplusDcCurrent,1)+"A ("+String(multiplusDcCurrent*NOM_VOLT,0)+"W)<br>";
+  webpage += "Multiplus capacity in-out: "+String(multiplusAh)+"Ah ("+String(multiplusAh*NOM_VOLT/1000.0,1)+"kWh)<br>";
   webpage += "<br>";
   webpage += "Failed commands: "+String(cmdFailCnt)+"/"+String(essCmdCounter)+"<br>";
   webpage += "<br>";
