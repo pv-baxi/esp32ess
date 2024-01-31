@@ -107,7 +107,7 @@ In chapter 7.3.11 the description starts with the 0x37 command ID. The bytes to 
 * 98 F7   = device address (from MK3 interface?)
 * FE      = differentiates between a data frame (0xFE) and a synchronization frame (0xFD)
 * XX      = frame number as increasing counter wrapping between 0 and 127. In our command, it has to match the last frame number send/received over the VE.Bus plus +1. If this number is not correct, the command will be ignored by the Multiplus.
-* 00 E6   = two-bytes number, which can be self-defined within some boundaries. It is repeated by the Multiplus in its acknowledgment responses. With that we can find out if the the Multiplus is answering to our own command.
+* 00 E6   = two-bytes number, which can be self-defined within some boundaries. It is repeated by the Multiplus in its acknowledgment responses. With that we can find out if the Multiplus is answering to our own command.
 * 37      = CommandWriteViaID
 * 02      = flags according to MK3 manual: 0x02 = RAMvar and no EEPROM storage
 * 83      = ID, address of ESS power value in assistant memory
@@ -133,7 +133,11 @@ After the command has been assembled and 0xFA..FF has been replaced, a checksum 
 
 0xYY = 1 - b[2] - b[3] - b[4] - ... - b[N-2] - b[N-1]
 
-Like all the other data, it's not allowed to be between 0xFA and 0xFF. So in case of such result, an 0xFA is inserted in front of the checksum and also included into the checksum calculation. Finally the "End Of Frame" character 0xFF is appended to the command. Then it's ready to be send out.
+Similar to the byte replacement, the checksum byte is not allowed to be between 0xF**B** and 0xFF. So in case of such result, an 0xFA is inserted in front of the checksum and also included into the checksum calculation. As an exception to the general byte replacement, the value **0xFA is allowed** as a checksum. Because otherwise it would be replaced by {0xFA 0x00}. And as 0x00 does not impact the checksum, it's not injected here.
+
+Finally the "End Of Frame" character 0xFF is appended to the command. Then it's ready to be send out.
+
+Note: The checksum can be easily verified for incoming frames by just summing over all bytes including the checksum byte and the end-of-frame 0xFF. If the result is 0, the checksum is correct.
 
 ### VE.Bus receive frames
 
