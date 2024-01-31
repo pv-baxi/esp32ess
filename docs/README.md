@@ -137,7 +137,7 @@ Similar to the byte replacement, the checksum byte is not allowed to be between 
 
 Finally the "End Of Frame" character 0xFF is appended to the command. Then it's ready to be send out.
 
-Note: The checksum can be easily verified for incoming frames by just summing over all bytes including the checksum byte and the end-of-frame 0xFF. If the result is 0, the checksum is correct.
+Note: The checksum can be easily verified for incoming frames by just summing over all bytes starting from b[2] and including the checksum byte and the end-of-frame 0xFF. If the result is 0, the checksum is correct.
 
 ### VE.Bus receive frames
 
