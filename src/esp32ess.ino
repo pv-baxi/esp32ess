@@ -46,9 +46,8 @@ const int CAN_RX_PIN = 22, CAN_TX_PIN = 21;           //Pylontech battery CAN = 
 const int VEBUS_RXD1=26, VEBUS_TXD1=25, VEBUS_DE=27;  //Victron Multiplus VE.bus RS485 gpio pins
 const int METER_IMPULSE_INPUT_PIN = 35;               //input pin from optical 1/10000kWh impulse output of power meter
 const int RED_LED = 2;                                //output gpio pin with external red LED (active low)
-const int VEBUS_TX_CYCLES = 7;          //How many ISR cycles it takes for the UART to send ESS command out. To enable RS485 transmitter during that time. 5 = not enough; 6=3% fail, 7=1% fail
 const int CPS = 10000;                  //CyclesPerSecond = How often per second our timer ISR is excuted
-const int WAITING_TIME_ACK = 0.1*CPS;   //How long we wait for the ESS command to be acknowledged by Multiplus. Comes normally between 25..43ms, so 1000 = 100ms makes sense
+const int WAITING_TIME_ACK = 0.9*CPS;   //How long we wait for the ESS command to be acknowledged by Multiplus. Comes normally between 25..43ms, so 1000 = 100ms makes sense
 const int SETTLING_MAX = 13.5*CPS;      //Maximum settling time
 const int SETTLING_DECREASE = 1200;     //How many Watt per Second Multiplus decreases charging oder discharging power
 const int SETTLING_INCREASE = 340;      //How many Watt per Second Multiplus increases charging oder discharging power
@@ -56,6 +55,8 @@ const int SETTLING_OFFSET = 2.0*CPS;    //settling time required in addition to 
 const int SETTLING_THRS2 = 200;         //in Watt: below this target, additional settling time is given to multiplus
 const int SETTLING_THRS1 = 100;         //in Watt: below this target, even more settling time is given to multiplus
 const int SETTLING_THRS_ADDON = 2.0*CPS;//extra settling time that is given for low targets per threshold
+const int SETTLING_IGNORE_PWR_SPIKE = 0.5*CPS;//discard power measurements during this period in order to ignore possible power spikes
+const int SETTLING_MODE_CHANGE = 3.0*CPS;//Wait 3 seconds after each Charger+Inverter mode change attempt
 const int CHARGE_LIMIT = 3300;          //Maximum Multiplus sink/charging power (70A * min. battery charging voltage), maximum is 3300W by experiment
 const int CHARGE_LIMIT_STEP = 200;      //step away from charge-limit (-Watt)
 const int DISCHARGE_LIMIT = 4300;       //Maximum Multiplus power feeding into the grid, maximum is 4300W by experiment
@@ -63,11 +64,12 @@ const int DISCHARGE_LIMIT_STEP = 200;   //step away from discharge-limit (+Watt)
 const int8_t SOC_LIMIT_UPPER = 96;      //turn off extra charging when battery is >= 96%
 const int8_t SOC_LIMIT_LOWER = 6;       //turn off extra discharge at SOC <= 6%, but still allow extra charging (except no-charge-mode)
 const int8_t SOC_LIMIT_EMERGENCY = 3;   //stop ESS state machine and sending ESS commands if SOC <= 3% and also stop logging soon
+const int8_t SOC_BELOW_CHARGE_ONLY = 30;//switch to charge-only mode below this battery level
+const int8_t SOC_DISCHARGE_ALLOWED = 35;//switch back to charge/discharge mode above this battery level
 const int SOC_LIMIT_UPPER_STEP = 100;   //discharge step away from 0W in case battery full (Watt)
 const int SOC_LIMIT_LOWER_STEP = 100;   //charge step away from 0W in case battery empty (Watt)
 const int NO_CHARGE_MODE_STEP = 100;    //discharge step away from 0W if in no-charge-mode (Watt)
 const int MAX_METER_DIFFERENCE = 200;   //if difference between current and last measurent > 100W, measure again to ignore short spikes (Watt)
-const int IGNORE_SPIKE_CYCLES = 0.5*CPS;//discard power measurements during this period in order to ignore possible power spikes
 const int ESS_POWER_OFFSET = 0;         //after each essPower calculation, add this offset to feed a little bit more into the grid (e.g. +2W)
 const int ONE_MINUTE = 60*CPS;          //as Multiplus ESS is automatically disabled about 72 sec after last command written, lastest after 60 seconds we must re-send current ESS power
 const int BUTTON_DEBOUNCE_TIME = 0.3*CPS;   //3000 = 300ms gives good results
@@ -91,6 +93,7 @@ const float NOM_VOLT = 48.0;            //Battery nominal voltage (for Watt/Wh e
 boolean extraCharge = false;          //allow/disallow negative ESS power (extra charging) to avoid sourcing additional current from the grid
 boolean extraDischarge = false;       //allow/disallow positive ESS power (extra discharging)
 boolean lowerEmergencySoc = false;    //allow/disallow Multiplus operation with one percent less battery (=SOC_LIMIT_EMERGENCY-1)
+boolean forceChargeOnlyMode = false;
 //other variables:
 int displayCounter = 0;             //counts how often LC display was updated
 char rxbuf[256];                    //used to store last serial bytes received from Multiplus, only a part of a frame
@@ -101,7 +104,7 @@ char txbuf2[64];                    //Multiplus output buffer containing the fin
 //char str[3*128+1];                //Buffer to temporarily store commands from/to Multiplus in HEX format and send it to SerialMonitor for debugging. +1 for being able to terminate our string with zero
 byte frp = 0;                       //Pointer into Multiplus framebuffer frbuf[] to store received frames.
 byte frameNr = 0;                   //Last frame number received from Multiplus. Own command has be be sent with frameNr+1, otherwise it will be ignored by Multiplus.
-int essCmdCounter = 0;              //Counts the number of ESS commands sent to Multiplus, including the failed ones.
+int veCmdCounter = 0;              //Counts the number of ESS commands sent to Multiplus, including the failed ones.
 short essPower = 0;                 //negative = charging battery,  positive = feed into grid
 short essPowerNew = 0;              //temporary value during ESS power calcuation
 boolean applyEssPowerNew = false;   //flag indicating that essPowerNew is ready to be written into Multiplus
@@ -110,8 +113,9 @@ int meterPowerPrevious = 0;         //result of previous power measurement for s
 int meterPowerOld = 0;              //for comparison in usingAbsoluteMeter() calculation if we got better or worse
 boolean secondMeasurement = false;  //flag after settling time is over, we've been waiting for a second measurement to complete
 float essR = 1.00;                  //Multiplus should not apply more power than meter shows, to keep regulation stable. In my case, Multiplus power is about 3.7% to 7.5% less than meter power. So setting to 1.00 is fine.
-int essCmdSendState = 0;            //2 ready to send; 1 has been send but no ACK yet; 0 acknowledged=done
-int cmdFailCnt = 0;                 //Counts the number of commands that were not acknowledged by Multiplus and had to be resent.
+byte veCmdSendState = 0;            //2 ready to send; 0x1X has been send but no ACK yet; 0 acknowledged=done; 7 set Charger+Discharger mode; 5 set Charge-Only mode
+int veTxCmdFailCnt = 0;             //Counts the number of commands that were not acknowledged by Multiplus and had to be resent.
+int veRxCmdFailCnt = 0;             //amount of received VE.Bus commands with wrong checksum
 char switchMode = SWITCH_MODE_DEFAULT;  //Switches between different regulation modes (special modes), see SWITCH_MODE_DEFAULT
 char logfile[LOGFILE_SIZE];         //logfile buffer, used as ringbuffer with pointer below
 int p_logfile = 0;                  //pointer to logfile ringbuffer
@@ -121,7 +125,7 @@ boolean batHealthWritten = false;   //Flag for writing battery health once into 
 boolean stopWritingLogfile = false; //writing to logfile will be stopped in X bytes in order to not overwrite important events
 int debugmin = 999999;              //used to log minimum battery level
 int debugmax = -999999;             //used to log maximum battery level
-int8_t soc = 0;                     //State Of Charge = received battery charge level via CAN bus (0..100%)
+int8_t soc = -1;                    //State Of Charge = received battery charge level via CAN bus (0..100%), -1 = invalid / not available
 boolean newMeterValue = false;      //indicating to various functions that we got a new power meter measurement result
 char printFrame[16];                //part of a frame, to be printed on LCD
 //Classes
@@ -132,16 +136,19 @@ WebServer server(80);
 byte    masterMultiLED_LEDon = 123;             //Bits 0..7 = mains on, absorption, bulk, float, inverter on, overload, low battery, temperature
 byte    masterMultiLED_LEDblink = 234;          //(LEDon=1 && LEDblink=1) = blinking; (LEDon=0 && LEDblink=1) = blinking_inverted 
 byte    masterMultiLED_Status = 12;             //0=ok, 2=battery low
-byte    masterMultiLED_AcInputConfiguration;
+byte    masterMultiLED_AcInputConfiguration;    //0x10=1st_AC_input_no_mode_change, 0x90=1st_AC_input_after_mode_change
 float   masterMultiLED_MinimumInputCurrentLimit;
-float   masterMultiLED_MaximumInputCurrentLimit;  //for details on MasterMultiLED frame see Victron MK2 protocol PDF
+float   masterMultiLED_MaximumInputCurrentLimit;//for details on MasterMultiLED frame see Victron MK2 protocol PDF
 float   masterMultiLED_ActualInputCurrentLimit;
-byte    masterMultiLED_SwitchRegister;
+byte    masterMultiLED_SwitchRegister;          //See Victron MK2 manual chapter 6.2; bits: 0x01=Charger_on_received, 0x02=Inverter_on_received, 0x10=Charger_finally_on, 0x20=Inverter_finally_on
 float   multiplusTemp = 11.1;
 float   multiplusDcCurrent = -22.2;
 int16_t multiplusAh = -12345;
-byte    multiplusStatus80 = 23;                 //status from the charger/inverter frame 0x80: 0=ok, 2=battery low
-bool    multiplusDcLevelAllowsInverting = false;
+byte    multiplusStatus80 = 23;                 //00=ok, 02=battery low
+byte    multiplusVoltageStatus;                 //11=ACin_disconnected, 12=inverter_off, 13=Battery_good_inverter_on, 17=Moment_of_ACin_interruption, 19=Moment_of_ACin_back_on
+byte    multiplusEmergencyPowerStatus;          //00=mains, 02=in_emergency_power_mode (=state of ACin relay)
+
+TaskHandle_t Task0;
 
 
 
@@ -158,7 +165,6 @@ bool    multiplusDcLevelAllowsInverting = false;
 // ##########################################################################################
 
 //Symbols used in ISR:
-volatile int vebusTxCnt = 0;                //counter counting the cycles the RS485 transceiver needs to be enabled while command to multiplus is sent
 volatile int cmdAckCnt = 0;                 //counter down-counting the time it takes for Multiplus acknowledging an ESS command
 volatile int debounceCnt = 2*CPS;           //start reacting on button 2 seconds after reboot
 volatile int essCnt = 0;                    //settling time counter while Multiplus applying new ESS power
@@ -186,7 +192,6 @@ volatile boolean isrNewMeterPulse = false;  //indicating that new meter impulse 
 // ===========================================================================
 void IRAM_ATTR onTimer()
 {
-  vebusTxCnt++;   //increase counter used in command-send state machine
   if (essMinuteCounter > 0) essMinuteCounter--;
   if (debounceCnt > 0) debounceCnt--;
   if (essCnt > 0) essCnt--;
@@ -290,7 +295,7 @@ void addFrameToLogfile(char *frame, int startbyte, int endbyte)
 
 
 // ===========================================================================
-//                      Assemble basic VE.Bus command
+//                   Assemble write-ESS-power VE.Bus command
 // ---------------------------------------------------------------------------
 // This function assembles the basic command to write the desired power towards
 // the Multiplus ESS assistant. Documentation is here:
@@ -312,6 +317,34 @@ int prepareESScommand(char *outbuf, short power, byte desiredFrameNr)
   outbuf[j++] = (power >> 8);   //Hi value of power (positive = into grid, negative = from grid)
   return j;
 }
+
+// ===========================================================================
+//              Assemble switch-Multiplus-mode VE.Bus command
+// ---------------------------------------------------------------------------
+// switchState:
+// 0x04 = Sleep
+// 0x05 = Charger-Only mode
+// 0x06 = Inverter-Only mode (turn AC-in off!)
+// 0x07 = Charger+Inverter mode (normal ON mode)
+// Note: From Inverter-Only mode, which is like emergency-power mode, you need
+//       to switch to Charger+Inverter mode first. Then wait ca. 3 minutes
+//       until Multiplus has synchronized to AC-in again.
+// ===========================================================================
+int prepareSwitchCommand(char *outbuf, byte switchState, byte desiredFrameNr)
+{
+  byte j=0;
+  outbuf[j++] = 0x98;           //MK3 interface to Multiplus
+  outbuf[j++] = 0xf7;           //MK3 interface to Multiplus
+  outbuf[j++] = 0xfe;           //data frame
+  outbuf[j++] = desiredFrameNr;
+  outbuf[j++] = 0x3F;           //VE.Bus switch Multiplus command
+  outbuf[j++] = switchState;
+  outbuf[j++] = 0x00;
+  outbuf[j++] = 0x00;
+  outbuf[j++] = 0x00;
+  return j;
+}
+
 
 // ===========================================================================
 //                        VE.Bus command replace FA..FF
@@ -375,6 +408,12 @@ int destuffFAtoFF(char *outbuf, char *inbuf, int inlength)
   return j;   //new length of output frame
 }
 
+bool verifyChecksum(char *inbuf, int inlength)
+{
+  byte cs = 0;
+  for (int i = 2; i < inlength; i++) cs += inbuf[i];  //sum over all bytes excluding the first two (address)
+  if (cs == 0) return true; else return false;
+}
 
 // ===========================================================================
 //                   Append checksum and 0xFF to command
@@ -444,13 +483,14 @@ bool decodeVEbusFrame(char *frame, int len)
       switch (frame[4]) {
         case 0x80:    //80 = Condition of Charger/Inverter (Temp+Current)
         {
-          if ((len==19) && (frame[5]==0x80) && ((frame[6]&0xFE)==0x12) && (frame[8]==0x80) && ((frame[11]&0x10)==0x10) && (frame[12]==0x00))
+          if ((len==19) && (frame[5]==0x80) && (frame[8]==0x80) && ((frame[11]&0x10)==0x10))
           {
             result = true; //known frame
             multiplusStatus80 = frame[7];
-            multiplusDcLevelAllowsInverting = (frame[6] & 0x01);
+            multiplusVoltageStatus = frame[6];
             int16_t t = 256*frame[10] + frame[9];
             multiplusDcCurrent = t/10.0;
+            multiplusEmergencyPowerStatus = frame[12];
             if ((frame[11] & 0xF0) == 0x30) multiplusTemp = frame[15]/10.0;
           }
           break;
@@ -471,9 +511,15 @@ bool decodeVEbusFrame(char *frame, int len)
           }
           break;
         }
-        case 0x00:
+        case 0x00:    //Acknowledgement to ESS power command
         {
           if ((len == 9) && (frbuf1[5] == 0xE6) && (frbuf1[6] == 0x87)) {
+            if ((veCmdSendState==0x12) && (cmdAckCnt > 0))    //if ACK was received in time
+            {
+              //debugEvaluate(cmdAckCnt);     //evaluate ACK timer position for debug purposes
+              veCmdSendState = 0;          //sending command is done
+              essMinuteCounter = ONE_MINUTE;    //restart ESS one-minute counter
+            }
             result = true; //We ignore our ACK frame for now... TBD
           }
           break;
@@ -493,6 +539,12 @@ bool decodeVEbusFrame(char *frame, int len)
             t = 256*frame[15] + frame[14];
             masterMultiLED_ActualInputCurrentLimit = t/10.0;
             masterMultiLED_SwitchRegister = frame[16];
+            //Check if mode was changed in time
+            if (cmdAckCnt > 0)
+            {
+              if ((veCmdSendState==0x17) && ((masterMultiLED_SwitchRegister&0x03)==0x03)) veCmdSendState = 0; //sending mode=Charger+Inverter is done
+              if ((veCmdSendState==0x15) && ((masterMultiLED_SwitchRegister&0x03)==0x01)) veCmdSendState = 0; //sending mode=Charger-Only is done
+            }
             result = true; //mark as known frame
           }
           break;
@@ -507,7 +559,7 @@ bool decodeVEbusFrame(char *frame, int len)
 //                     VE.Bus to Multiplus command handling
 // ---------------------------------------------------------------------------
 // This function exclusively "deals" with the VE.Bus serial buffer. It's
-// written as a state machine acting on variable essCmdSendState:
+// written as a state machine acting on variable veCmdSendState:
 //   2 ready to send
 //   1 has been send but no ACK yet
 //   0 acknowledged = done
@@ -517,72 +569,11 @@ bool decodeVEbusFrame(char *frame, int len)
 void multiplusCommandHandling()
 {
   //Check if command acknowledge time is over. If yes, trigger to resend command
-  if ((essCmdSendState==1) && (cmdAckCnt <= 0))
+  if (((veCmdSendState & 0x10)==0x10) && (cmdAckCnt <= 0))
   {
-    essCmdSendState = 2;  //ready to re-send
-    cmdFailCnt++;     //increase failed commands counter
-    addToLogfile("\n"+String(relTime)+" FAIL");
-  }
-  //Check for new bytes on UART
-  int nr = Serial1.available();
-  if (nr > 0)
-  {
-    Serial1.read(rxbuf, nr);    //read all available bytes
-    for (int n=0; n<nr; n++)          //loop over all new bytes
-    {
-      char c = rxbuf[n];       //read one byte
-      frbuf0[frp++] = c;   //store into framebuffer
-      if (c==0xFF)        //in case current byte was EndOfFrame, interprete frame
-      {
-        //convert content of framebuffer to HEX string and send to SerialMonitor
-        //convertFrameToHEXstring(frbuf, str, frp);
-        //Serial.println(str);
-        //destuff frame:
-        int frlen = destuffFAtoFF(frbuf1, frbuf0, frp);
-        if (not decodeVEbusFrame(frbuf1, frlen))
-        {
-          addFrameToLogfile(frbuf1,0,frlen-1);
-          //if ((frbuf1[4]==0xE4) && (frlen==20)); addFrameToLogfile(frbuf0,0,frp-1);   //for debugging
-        }
-        //continue interpreting frame:
-        if ((frbuf1[2] == 0xFD) && (frbuf1[4] == 0x55))  //if it was a sync frame:
-        {
-          frameNr = frbuf1[3];
-          if ((essCmdSendState == 2) && (n == nr-1))       //if new ESSpower should be written and 0xFF (end of frame) was last received character:
-          {
-            //send ESS command
-            int len = prepareESScommand(txbuf1, essPower, (frameNr+1) & 0x7F);
-            len = commandReplaceFAtoFF(txbuf2, txbuf1, len);
-            len = appendChecksum(txbuf2, len);
-            //write command into Multiplus :-)
-            digitalWrite(VEBUS_DE,HIGH);      //set RS485 direction to write
-            Serial1.write(txbuf2, len); //write command bytes to UART
-            //convertFrameToHEXstring(txbuf2, str, len);
-            //Serial.println(str);    //print to SerialMonitor
-            vebusTxCnt = 0;   //reset time after sending out command
-            while (vebusTxCnt < VEBUS_TX_CYCLES) {}   //wait until UART command has been transmitted out (~615µs)
-            digitalWrite(VEBUS_DE,LOW);   //set RS485 direction to read
-            cmdAckCnt = WAITING_TIME_ACK;     //set counter with max. waiting time for ACK
-            essCmdCounter++;        //amount of ESS commands sent (successful + unsuccessful)
-            essCmdSendState = 1;        //wait for confirmation if command was successful
-          }
-        }
-        if ((frbuf1[0] == 0x83) && (frbuf1[1] == 0x83) && (frbuf1[2] == 0xFE) && (frbuf1[4] == 0x00) && (frbuf1[5] == 0xE6) && (frbuf1[6] == 0x87))  //if it is a (positive) response to an ESS write
-        {
-          //convertFrameToHEXstring(frbuf, str, frlen);
-          //addToLogfile(str);
-          //addToLogfile("\n");
-          if ((essCmdSendState==1) && (cmdAckCnt > 0))    //if ACK was received in time
-          {
-            //debugEvaluate(cmdAckCnt);     //evaluate ACK timer position for debug purposes
-            essCmdSendState = 0;          //sending command is done
-            essMinuteCounter = ONE_MINUTE;    //restart ESS one-minute counter
-          }
-        }
-        //now framebuffer can be cleared
-        frp = 0;
-      }
-    }
+    veCmdSendState = veCmdSendState & 0x0F;   //ready to re-send
+    veTxCmdFailCnt++;     //increase failed commands counter
+    addToLogfile("\nFAIL cmd "+String(veCmdSendState,HEX));
   }
 }
 
@@ -636,7 +627,7 @@ void applyNewEssPower(short power)
 {
   short essPowerPrevious = essPower;   //backup current essPower value for comparison reasons
   essPower = power;               //set new desired ESS power
-  essCmdSendState = 2;            //force sending ESS command
+  veCmdSendState = 2;            //force sending ESS command
   //Always do setting. If there was no change in essPower, setting is only as long as SETTLING_OFFSET.
   int settling = SETTLING_OFFSET;
   if (((essPowerPrevious<0) && (essPower<0)) || ((essPowerPrevious>0) && (essPower>0)))
@@ -802,7 +793,7 @@ void updateMultiplusPower_usingAbsoluteMeter()
 void avoidMultiplusTimeout()
 {
   //Check if ESS power value was not re-written into Multiplus for more than 60 seconds
-  if ((essMinuteCounter <= 0) && (essCmdSendState==0))
+  if ((essMinuteCounter <= 0) && (veCmdSendState==0))
   {
     addToLogfile("\n"+String(relTime)+" timeout");
     //Also in this case react on reached SOC limits:
@@ -921,7 +912,7 @@ void checkImpulsePowerMeter()
 // Additionally this function checks if there was an unusual high difference
 // compared to the last measured meter value. If that's the case, and if the
 // setting time of the Multiplus was already (or nearly) over, the settling
-// time is extended again to IGNORE_SPIKE_CYCLES.
+// time is extended again to SETTLING_IGNORE_PWR_SPIKE.
 // In case the power spike was correct, and generated by a large sink turning
 // on, this will just delay the ESS power adaptation by a neglectable amount
 // of time. In case it was a short spike due to e.g. a motor turning on, this
@@ -943,13 +934,40 @@ void onNewMeterValue()
     // If difference to previous meter value is very large, it just might just be a sudden power spike (e.g. from a device turning on).
     // In case we're well in the settling, high power differences are normal and can be ignored. In case settling was already (or nearly)
     // over, settling time is extended again:
-    if ((abs(meterPower-meterPowerPrevious) >= MAX_METER_DIFFERENCE) && (essCnt < IGNORE_SPIKE_CYCLES))
+    if ((abs(meterPower-meterPowerPrevious) >= MAX_METER_DIFFERENCE) && (essCnt < SETTLING_IGNORE_PWR_SPIKE))
     {
-      essCnt = IGNORE_SPIKE_CYCLES;
+      essCnt = SETTLING_IGNORE_PWR_SPIKE;
       addToLogfile(" spike "+String((relTime+essCnt/(CPS/10))%1000));
     }
   }
 }
+
+
+void automaticChargerOnlySwitching()
+{
+  if ((veCmdSendState == 0) && (essCnt<=0)) {
+    if (forceChargeOnlyMode) {
+      if ((masterMultiLED_SwitchRegister & 0x30) == 0x30) {
+        veCmdSendState = 0x05;   //If inverter on, force switching to charger-only-mode
+        essCnt = SETTLING_MODE_CHANGE;    //Wait some time...
+        addToLogfile("\nSwitch to Charger-only due to force-flag");
+      }
+    }
+    else {
+      if ((soc>=0) && (soc<SOC_BELOW_CHARGE_ONLY) && ((masterMultiLED_SwitchRegister&0x30)==0x30)) {
+        veCmdSendState = 0x05; //switch to charger-only-mode
+        essCnt = SETTLING_MODE_CHANGE;    //Wait some time...
+        addToLogfile("\nSwitch to Charger-only mode");
+      }
+      if ((soc>=SOC_DISCHARGE_ALLOWED) && ((masterMultiLED_SwitchRegister&0x30)==0x10)) {
+        veCmdSendState = 0x07;            //switch to charger+inverter mode
+        essCnt = SETTLING_MODE_CHANGE;    //Wait some time...
+        addToLogfile("\nSwitch to Charger+Inverter mode");
+      }
+    }
+  }
+}
+
 
 
 // ===========================================================================
@@ -965,7 +983,7 @@ void switchSpecialModes(char desiredMode)
   if (desiredMode==0) {
     //Here, function was called from main loop.
     //Time-limited modes: Check, if we are in such mode and duration is over:
-    if ((switchMode==33) && (specialModeCnt<=0))    //if (((switchMode==33) || (switchMode==67)) && (specialModeCnt<=0))
+    if ((switchMode=='!') && (specialModeCnt<=0))    //if (((switchMode=='!') || (switchMode=='n')) && (specialModeCnt<=0))
     {
       switchMode = SWITCH_MODE_DEFAULT;
       switchModeChanged = true;           //flag to apply mode below
@@ -975,10 +993,11 @@ void switchSpecialModes(char desiredMode)
     boolean bootButton = digitalRead(0);
     if ((bootButton == 0) && (debounceCnt <= 0))    //if button has been pressed and debouncing period is over
     {
-      if (switchMode == 78) switchMode = 67;         //67=No-Charge-Mode
-      else if (switchMode == 67) switchMode = 48;    //48=0W-Mode
-      else if (switchMode == 48) switchMode = 33;    //33=Low-SOC mode
-      else if (switchMode == 33) switchMode = 78;    //78=Normal Mode
+      if (switchMode == '!') switchMode = 'N';        //N = Normal Mode
+      else if (switchMode == 'N') switchMode = 'n';   //n = no-extra-Charge-Mode
+      else if (switchMode == 'n') switchMode = '0';   //0 = 0W Charge+Discharge Mode
+      else if (switchMode == '0') switchMode = 'C';   //5 = 0W Charger-only Mode
+      else if (switchMode == 'C') switchMode = '!';   //! = Low-SOC charge mode
       debounceCnt = BUTTON_DEBOUNCE_TIME;     //3000 = 300ms
       specialModeCnt = SWITCH_MODE_DURATION;  //always start timer. If mode automatically ends or not, depends on code above.
       switchModeChanged = true;               //flag to apply mode below
@@ -993,36 +1012,51 @@ void switchSpecialModes(char desiredMode)
   if (switchModeChanged) {
     switchModeChanged = false;  //reset flag
     switch (switchMode) {
-      case 78:    // N   Normal mode: Useful for Multiplus in ACin-only wiring
+      case 'N':    // Normal mode: Useful for Multiplus in ACin-only wiring
       {
-        extraCharge = true;         //allow (extra) charging
-        extraDischarge = true;      //allow (extra) discharging
-        lowerEmergencySoc = false;  //normal battery levels
+        extraCharge = true;           //allow (extra) charging
+        extraDischarge = true;        //allow (extra) discharging
+        lowerEmergencySoc = false;    //normal battery levels
+        forceChargeOnlyMode = false;  //allow Inverter+Charger enabled
         addToLogfile("\n-> enter Normal Mode");
         break;
       }
-      case 33:    // !   Low-SOC mode: Use to recharge battery in case Multiplus was turned off due to SOC_LIMIT_EMERGENCY
+      case '!':    // Low-SOC mode: Use to recharge battery in case Multiplus was turned off due to SOC_LIMIT_EMERGENCY
       {
-        extraCharge = true;         //allow (extra) charging
-        extraDischarge = false;     //as this mode is intended for charging, don't allow to extra-discharge battery
-        lowerEmergencySoc = true;   //BE CAREFUL! Only allow in this time-limited mode.
+        extraCharge = true;           //allow (extra) charging
+        extraDischarge = false;       //as this mode is intended for charging, don't allow to extra-discharge battery
+        lowerEmergencySoc = true;     //BE CAREFUL! Only allow in this time-limited mode.
+        forceChargeOnlyMode = true;   //force Charger-Only mode
+        //veCmdSendState = 0x05;
         addToLogfile("\n-> enter Low-SOC-Mode");
         break;
       }
-      case 48:    // 0   0W-Mode: Useful for testing. And useful in ACout-wiring during months of limited PV power.
+      case '0':    // 0W ON Mode: Useful for testing. And useful in ACout-wiring during months of limited PV power.
       {
-        extraCharge = false;        //don't allow extra charging
-        extraDischarge = false;     //don't allow extra discharging
-        lowerEmergencySoc = false;  //normal battery levels
-        addToLogfile("\n-> enter 0W-Mode");
+        extraCharge = false;          //don't allow extra charging
+        extraDischarge = false;       //don't allow extra discharging
+        lowerEmergencySoc = false;    //normal battery levels
+        forceChargeOnlyMode = false;  //allow Inverter+Charger enabled
+        addToLogfile("\n-> enter 0W ON Mode");
         break;
       }
-      case 67:    // C   No-Charge-Mode: Useful with ACout-wiring if PV is completely connected to ACout.
+      case 'C':    // 0W ChargerOnly Mode
+      {
+        extraCharge = false;          //don't allow extra charging
+        extraDischarge = false;       //don't allow extra discharging
+        lowerEmergencySoc = false;    //normal battery levels
+        forceChargeOnlyMode = true;   //force Charger-Only mode
+        //veCmdSendState = 0x07;
+        addToLogfile("\n-> enter 0W ChargerOnly Mode");
+        break;
+      }
+      case 'n':    // no-extra-Charge-Mode: Useful with ACout-wiring if PV is completely connected to ACout.
       {           //                Also useful with problematic devices on absolute power meter (not providing consumption / feed-in direction)
-        extraCharge = false;              //no extra charging
-        extraDischarge = true;            //allow (extra) discharging
-        lowerEmergencySoc = false;        //normal battery levels
-        addToLogfile("\n-> enter No-Charge-Mode");
+        extraCharge = false;          //no extra charging
+        extraDischarge = true;        //allow (extra) discharging
+        lowerEmergencySoc = false;    //normal battery levels
+        forceChargeOnlyMode = false;  //allow Inverter+Charger enabled
+        addToLogfile("\n-> enter no-extra-Charge-Mode");
         break;
       }
     }
@@ -1053,7 +1087,7 @@ void updateDisplays()
     lcd.print("A  ");
     //Print Multiplus status
     lcd.setCursor(14, 0);
-    if (masterMultiLED_Status==multiplusStatus80) lcd.print(masterMultiLED_Status); else lcd.print("??");
+    lcd.print(masterMultiLED_SwitchRegister,HEX);
     lcd.print("  ");
     //Print battery charge level (SOC)
     lcd.setCursor(17, 0);
@@ -1062,10 +1096,12 @@ void updateDisplays()
     if ((soc >= 0) && (soc <= 100)) lcd.print(soc); else lcd.print("--");
     //Print failed + total ESS commands + settling
     lcd.setCursor(0, 1);
-    lcd.print(cmdFailCnt);
+    lcd.print(veTxCmdFailCnt);
     lcd.print("/");
-    lcd.print(essCmdCounter);  
+    lcd.print(veCmdCounter);
     lcd.print("/");
+    lcd.print(veRxCmdFailCnt);
+    lcd.print(" ");
     lcd.print(essCnt);
     lcd.print("  ");
         //Print if logged into WiFi or not
@@ -1086,6 +1122,18 @@ void updateDisplays()
     lcd.setCursor(14, 2);
     lcd.print(essPower);
     lcd.print("W");
+    //print other debug information
+    lcd.setCursor(0, 3);
+    lcd.print(masterMultiLED_AcInputConfiguration,HEX);
+    lcd.print(" ");
+    lcd.print(masterMultiLED_Status,HEX);
+    lcd.print(" ");
+    lcd.print(multiplusStatus80,HEX);
+    lcd.print(" ");
+    lcd.print(multiplusVoltageStatus,HEX);
+    lcd.print(" ");
+    lcd.print(multiplusEmergencyPowerStatus,HEX);
+    lcd.print(" ");
     // //Print desired frame
     // lcd.setCursor(0, 3);
     // char temp[4];
@@ -1185,11 +1233,14 @@ void handleRoot() {
   webpage += "<br>";
   webpage += "MasterMultiLED Status: "+String(masterMultiLED_Status)+"<br>";
   webpage += "Charger/Inverter Status: "+String(multiplusStatus80)+"<br>";
-  webpage += "DC voltage allows inverting: "+String(multiplusDcLevelAllowsInverting)+"<br>";
+  webpage += "Voltage status: 0x"+String(multiplusVoltageStatus,HEX)+"<br>";
+  webpage += "Emergency power status: "+String(multiplusEmergencyPowerStatus)+"<br>";
   webpage += "AC input current limit: "+String(masterMultiLED_ActualInputCurrentLimit,1)+"A<br>";
+  webpage += "AC input configuration: 0x"+String(masterMultiLED_AcInputConfiguration,HEX)+"<br>";
   webpage += "MasterMultiLED switch value: 0x"+String(masterMultiLED_SwitchRegister,HEX)+"<br>";
   webpage += "<br>";
-  webpage += "Failed commands: "+String(cmdFailCnt)+"/"+String(essCmdCounter)+"<br>";
+  webpage += "VE.Bus TX frames failed: "+String(veTxCmdFailCnt)+"/"+String(veCmdCounter)+"<br>";
+  webpage += "VE.Bus RX frames wrong checksum: "+String(veRxCmdFailCnt)+"<br>";
   webpage += "<br>";
   webpage += "Battery min: "+String(debugmin)+"<br>";
   webpage += "Battery max: "+String(debugmax)+"<br>";
@@ -1282,9 +1333,70 @@ void setup() {
   timerAttachInterrupt(My_timer, &onTimer, true);
   timerAlarmWrite(My_timer, 4000, true);  //value at which ISR is executed, cannot be 0, 1220 means 32760Hz, 4000 means 10kHz
   timerAlarmEnable(My_timer);
+  //Now execute the VE.Bus handling code on core0, where it's executed by FreeRTOS in 1ms slices:
+  xTaskCreatePinnedToCore(veBusHandling, "VEBus", 10000, NULL, 0, &Task0, 0);   //Priority 0, CPU 0
+  //Wait a second before starting the main loop
+  delay(1000);
 }
 
-
+void veBusHandling(void * parameter)
+{
+  //Before starting, clear the VE.Bus RX buffer
+  Serial1.flush(false);        //TXonly=false -> including RX buffer
+  //Now run the following code continiously
+  while(true)
+  {
+    //Check for new bytes on UART
+    while (Serial1.available())
+    {
+      char c = Serial1.read();  //read one byte
+      frbuf0[frp++] = c;        //store into framebuffer
+      if (c==0xFF)              //in case current byte was EndOfFrame, interprete frame
+      {
+        if ((frbuf0[2] == 0xFD) && (frbuf0[4] == 0x55))  //if it was a sync frame:
+        {
+          frameNr = frbuf0[3];
+          if ((veCmdSendState > 0) && !(veCmdSendState & 0x10)){    //if a new VE.Bus command is waiting to be sent (excluding acknowledgements)
+            //build desired command
+            int len = 0;
+            if (veCmdSendState == 2) len = prepareESScommand(txbuf1, essPower, (frameNr+1) & 0x7F); //write new ESS power
+            else                     len = prepareSwitchCommand(txbuf1, veCmdSendState, (frameNr+1) & 0x7F);//7=Normal 6=InvertOnly 5=ChargeOnly 4=Standby
+            //postprocess command
+            len = commandReplaceFAtoFF(txbuf2, txbuf1, len);
+            len = appendChecksum(txbuf2, len);
+            //write command into Multiplus :-)
+            digitalWrite(VEBUS_DE,HIGH);          //set RS485 direction to write
+            Serial1.write(txbuf2, len);           //write command bytes to UART
+            Serial1.flush();                      //simply wait until the command is sent out
+            digitalWrite(VEBUS_DE,LOW);           //set RS485 direction to read
+            cmdAckCnt = WAITING_TIME_ACK;         //set counter with max. waiting time for ACK
+            veCmdCounter++;                       //amount of VE.Bus commands sent (successful + unsuccessful)
+            veCmdSendState = veCmdSendState | 0x10;   //wait for confirmation if command was successful
+          }
+        }
+        else if ((frp==5) && (frbuf0[0] == 0x00) && (frbuf0[1] == 0xFB) && (frbuf0[2]+frbuf0[3] == 0x7F) && (frbuf0[4] == 0xFF))
+        { //5-bytes frames coming when Multiplus boots and when ACin disconnects
+          //do nothing for now and ignore those frames
+        }
+        else
+        {    //If frame was not sync, and not the bootup frame above, let's decode it:
+          if (verifyChecksum(frbuf0, frp)) {
+            int frlen = destuffFAtoFF(frbuf1, frbuf0, frp);
+            if (not decodeVEbusFrame(frbuf1, frlen)) addFrameToLogfile(frbuf1,0,frlen-1);
+          }
+          else {
+            //only add wrong frame to logfile, don't decode
+            addToLogfile("\nwrong CS:");
+            addFrameToLogfile(frbuf0,0,frp-1);  //add complete frame into logfile
+            veRxCmdFailCnt++;                   //amount of received commands with wrong checksum
+          }
+        }
+        //now framebuffer can be cleared
+        frp = 0;
+      }
+    }
+  }
+}
 
 // #################################################
 //   __  __       _         _                      
@@ -1295,6 +1407,7 @@ void setup() {
 //                                          |_|    
 // #################################################
 void loop() {
+  automaticChargerOnlySwitching();
   multiplusCommandHandling();                 //Multiplus VEbus: Process VEbus information and execute command-sending state machine
   batteryHandling();                          //Battery: Get new battery level (SOC value) from CAN bus, if available
   checkImpulsePowerMeter();                   //Impulse power meter: Check if new 1/10000kWh impulse is available and calculate meter value
@@ -1303,12 +1416,12 @@ void loop() {
   if ((soc > SOC_LIMIT_EMERGENCY) || (lowerEmergencySoc && (soc >= (SOC_LIMIT_EMERGENCY-1)))) {
     //If battery is above minimum charge level or battery is lower, but we are in lowerEmergencySoc-Mode
     avoidMultiplusTimeout();            //Ensures that at least every minute Multiplus gets an ESS command. Otherwise it will turn off.
-    if (applyEssPowerNew) {             //If there is a new ESS power to be written into Multiplus:
-        if (lowerEmergencySoc) {                  //In case we are in lowerEmergencySoc-Mode, always charge with 300W
-          essPowerNew = limitNewEsspower(-300);   //Limit ESS power based on SOC and mode options
-        }
-        applyEssPowerNew = false;          //reset flag
-        applyNewEssPower(essPowerNew);     //write essPowerNew into Multiplus
+    if ((applyEssPowerNew) && (veCmdSendState==0)) {   //If there is a new ESS power to be written into Multiplus:
+      if (lowerEmergencySoc) {                  //In case we are in lowerEmergencySoc-Mode, always charge with 300W
+        essPowerNew = limitNewEsspower(-300);   //Limit ESS power based on SOC and mode options
+      }
+      applyEssPowerNew = false;          //reset flag
+      applyNewEssPower(essPowerNew);     //write essPowerNew into Multiplus
     }
   }
   switchSpecialModes(0);                      //handle BOOT button press activities (GPIO0)
