@@ -563,8 +563,16 @@ bool decodeVEbusFrame(char *frame, int len)
             //Check if mode was changed in time
             if (cmdAckCnt > 0)
             {
-              if ((veCmdSendState==0x17) && ((masterMultiLED_SwitchRegister&0x03)==0x03)) veCmdSendState = 0; //sending mode=Charger+Inverter is done
-              if ((veCmdSendState==0x15) && ((masterMultiLED_SwitchRegister&0x03)==0x01)) veCmdSendState = 0; //sending mode=Charger-Only is done
+              if ((veCmdSendState==0x17) && ((masterMultiLED_SwitchRegister&0x03)==0x03)) {
+                multiplusSettlingCnt = SETTLING_MODE_CHANGE;    //Start settling
+                addToLogfile("\nSwitched to Charger+Inverter mode");
+                veCmdSendState = 0;                             //sending mode=Charger+Inverter mode is done
+              }
+              if ((veCmdSendState==0x15) && ((masterMultiLED_SwitchRegister&0x03)==0x01)) {
+                multiplusSettlingCnt = SETTLING_MODE_CHANGE;    //Start settling
+                addToLogfile("\nSwitched to Charger-Only mode");
+                veCmdSendState = 0;                             //sending mode=ChargerOnly mode is done
+              }
             }
             result = true; //mark as known frame
           }
@@ -949,35 +957,19 @@ void onNewMeterValue()
 
 void automaticChargerOnlySwitching()
 {
-  //first check if supply emergency power right now. If yes, automatically switch to 'E'-Mode.
-  if (multiplusEmergencyPowerStatus==0x02) switchSpecialModes('E');
+  //First check if we currently supply emergency power, but are not in 'E'-mode yet. If yes, switch to 'E'-Mode.
+  if ((multiplusEmergencyPowerStatus==0x02) && (switchMode!='E')) switchSpecialModes('E');
   //Now check if the working mode of the Multiplus needs to be changed for some reason.
   if ((veCmdSendState == 0) && (multiplusSettlingCnt<=0)) {
     if (forceChargeOnlyMode) {
-      if ((masterMultiLED_SwitchRegister & 0x30) != 0x10) {
-        veCmdSendState = 0x05;   //If not in charger-only mode, force switching to it
-        multiplusSettlingCnt = SETTLING_MODE_CHANGE;    //Wait some time...
-        addToLogfile("\nSwitch to Charger-only due to force-flag");
-      }
+      if ((masterMultiLED_SwitchRegister & 0x30) != 0x10) veCmdSendState = 0x05;   //If not in charger-only mode, force switching to it
     }
     else if (switchMode=='E') {
-      if ((masterMultiLED_SwitchRegister & 0x30) != 0x30) {
-        veCmdSendState = 0x07;   //If not in Inverter+Charger mode, force switching to it
-        multiplusSettlingCnt = SETTLING_MODE_CHANGE;    //Wait some time...
-        addToLogfile("\nSwitch to Inverter+Charger due to 'E'-mode");
-      }
+      if ((masterMultiLED_SwitchRegister & 0x30) != 0x30) veCmdSendState = 0x07;   //If not in Inverter+Charger mode, force switching to it
     }
     else {  //if we are not in any special force-mode:
-      if ((soc>=0) && (soc<SOC_BELOW_CHARGE_ONLY) && ((masterMultiLED_SwitchRegister&0x30)==0x30)) {
-        veCmdSendState = 0x05; //switch to charger-only-mode
-        multiplusSettlingCnt = SETTLING_MODE_CHANGE;    //Wait some time...
-        addToLogfile("\nSwitch to Charger-only mode");
-      }
-      if ((soc>=SOC_DISCHARGE_ALLOWED) && ((masterMultiLED_SwitchRegister&0x30)==0x10)) {
-        veCmdSendState = 0x07;            //switch to charger+inverter mode
-        multiplusSettlingCnt = SETTLING_MODE_CHANGE;    //Wait some time...
-        addToLogfile("\nSwitch to Charger+Inverter mode");
-      }
+      if ((soc>=0) && (soc<SOC_BELOW_CHARGE_ONLY) && ((masterMultiLED_SwitchRegister&0x30)==0x30)) veCmdSendState = 0x05; //switch to charger-only-mode
+      if ((soc>=SOC_DISCHARGE_ALLOWED) && ((masterMultiLED_SwitchRegister&0x30)==0x10)) veCmdSendState = 0x07;            //switch to charger+inverter mode
     }
   }
 }
@@ -1001,7 +993,7 @@ void switchSpecialModes(char desiredMode)
     {
       switchMode = SWITCH_MODE_DEFAULT;
       switchModeChanged = true;           //flag to apply mode below
-      addToLogfile("\n-> back in default Mode by timeout");
+      addToLogfile("\n-> back in default Mode by timeout:");
     }
     //React on button-press
     boolean bootButton = digitalRead(0);
@@ -1020,8 +1012,9 @@ void switchSpecialModes(char desiredMode)
   }
   else {
     //If this function was called with desired mode from setup():
-    switchMode = desiredMode;           //apply desired mode
-    switchModeChanged = true;           //flag to apply mode below
+    switchMode = desiredMode;               //apply desired mode
+    specialModeCnt = SWITCH_MODE_DURATION;  //always start timer. If mode automatically ends or not, depends on code above.
+    switchModeChanged = true;               //flag to apply mode below
   }
   //If there was a mode-change, apply mode:
   if (switchModeChanged) {
