@@ -56,26 +56,26 @@ const int SETTLING_THRS2 = 200;         //in Watt: below this target, additional
 const int SETTLING_THRS1 = 100;         //in Watt: below this target, even more settling time is given to multiplus
 const int SETTLING_THRS_ADDON = 2.0*CPS;//extra settling time that is given for low targets per threshold
 const int SETTLING_IGNORE_PWR_SPIKE = 0.5*CPS;//discard power measurements during this period in order to ignore possible power spikes
-const int SETTLING_MODE_CHANGE = 3.0*CPS;//Wait 3 seconds after each Charger+Inverter mode change attempt
+const int SETTLING_MODE_CHANGE = 5.0*CPS;//Wait 5 seconds after each Charger+Inverter mode change attempt
 const int CHARGE_LIMIT = 3300;          //Maximum Multiplus sink/charging power (70A * min. battery charging voltage), maximum is 3300W by experiment
 const int CHARGE_LIMIT_STEP = 200;      //step away from charge-limit (-Watt)
 const int DISCHARGE_LIMIT = 4300;       //Maximum Multiplus power feeding into the grid, maximum is 4300W by experiment
 const int DISCHARGE_LIMIT_STEP = 200;   //step away from discharge-limit (+Watt)
 const int8_t SOC_LIMIT_UPPER = 96;      //turn off extra charging when battery is >= 96%
 const int8_t SOC_LIMIT_LOWER = 6;       //turn off extra discharge at SOC <= 6%, but still allow extra charging (except no-charge-mode)
-const int8_t SOC_LIMIT_EMERGENCY = 3;   //stop ESS state machine and sending ESS commands if SOC <= 3% and also stop logging soon
+const int8_t SOC_LIMIT_LOWEST = 3;      //stop ESS state machine and sending ESS commands if SOC <= 3% and also stop logging soon
 const int8_t SOC_BELOW_CHARGE_ONLY = 30;//switch to charge-only mode below this battery level
 const int8_t SOC_DISCHARGE_ALLOWED = 35;//switch back to charge/discharge mode above this battery level
 const int SOC_LIMIT_UPPER_STEP = 100;   //discharge step away from 0W in case battery full (Watt)
 const int SOC_LIMIT_LOWER_STEP = 100;   //charge step away from 0W in case battery empty (Watt)
 const int NO_CHARGE_MODE_STEP = 100;    //discharge step away from 0W if in no-charge-mode (Watt)
 const int MAX_METER_DIFFERENCE = 200;   //if difference between current and last measurent > 100W, measure again to ignore short spikes (Watt)
-const int ESS_POWER_OFFSET = 0;         //after each essPower calculation, add this offset to feed a little bit more into the grid (e.g. +2W)
+const int ESS_POWER_OFFSET = 0;         //after each ESS power calculation, add this offset to feed a little bit more into the grid (e.g. +2W)
 const int ONE_MINUTE = 60*CPS;          //as Multiplus ESS is automatically disabled about 72 sec after last command written, lastest after 60 seconds we must re-send current ESS power
 const int BUTTON_DEBOUNCE_TIME = 0.3*CPS;   //3000 = 300ms gives good results
 const int LOGFILE_SIZE = 65510;         //Maximum text buffer that can be sent via HTTP is 65519 byte (2^16 -1 -16)
 const int SOC_WATCHDOG_CYCLES = 2.5*CPS;//time after which Multiplus is turned off in case there was no SOC received from battery (2.5 seconds)
-const char SWITCH_MODE_DEFAULT = 48;    //Default switch mode to start with. For mode numbers see function switchSpecialModes()
+const char SWITCH_MODE_DEFAULT = '0';    //Default switch mode to start with. For mode numbers see function switchSpecialModes()
 const int SWITCH_MODE_DURATION = 60*60*CPS; //automatically exit specific the switch modes after 60 minutes
 const float NOM_VOLT = 48.0;            //Battery nominal voltage (for Watt/Wh estimation)
 
@@ -92,22 +92,19 @@ const float NOM_VOLT = 48.0;            //Battery nominal voltage (for Watt/Wh e
 //mode options:
 boolean extraCharge = false;          //allow/disallow negative ESS power (extra charging) to avoid sourcing additional current from the grid
 boolean extraDischarge = false;       //allow/disallow positive ESS power (extra discharging)
-boolean lowerEmergencySoc = false;    //allow/disallow Multiplus operation with one percent less battery (=SOC_LIMIT_EMERGENCY-1)
 boolean forceChargeOnlyMode = false;
 //other variables:
 int displayCounter = 0;             //counts how often LC display was updated
-char rxbuf[256];                    //used to store last serial bytes received from Multiplus, only a part of a frame
-char frbuf0[256];                    //assembles one complete frame received by Multiplus
+char frbuf0[256];                   //assembles one complete frame received by Multiplus
 char frbuf1[256];                   //frame without replacement
 char txbuf1[64];                    //buffer for assembling bare command towards Multiplus (without replacements or checksum)
 char txbuf2[64];                    //Multiplus output buffer containing the final command towards Multiplus, including replacements and checksum
 //char str[3*128+1];                //Buffer to temporarily store commands from/to Multiplus in HEX format and send it to SerialMonitor for debugging. +1 for being able to terminate our string with zero
 byte frp = 0;                       //Pointer into Multiplus framebuffer frbuf[] to store received frames.
 byte frameNr = 0;                   //Last frame number received from Multiplus. Own command has be be sent with frameNr+1, otherwise it will be ignored by Multiplus.
-int veCmdCounter = 0;              //Counts the number of ESS commands sent to Multiplus, including the failed ones.
-short essPower = 0;                 //negative = charging battery,  positive = feed into grid
-short essPowerNew = 0;              //temporary value during ESS power calcuation
-boolean applyEssPowerNew = false;   //flag indicating that essPowerNew is ready to be written into Multiplus
+int veCmdCounter = 0;               //Counts the number of ESS commands sent to Multiplus, including the failed ones.
+short essPowerDesired = 0;          //This value will be written into Multiplus when setting veCmdSendState = 2; negative = charging battery; positive = feed into grid
+short essPowerTmp = 0;              //temporary value during ESS power calcuation
 int meterPower = 0;                 //result of newest power measurement
 int meterPowerPrevious = 0;         //result of previous power measurement for spike detection
 int meterPowerOld = 0;              //for comparison in usingAbsoluteMeter() calculation if we got better or worse
@@ -129,10 +126,18 @@ int8_t soc = -1;                    //State Of Charge = received battery charge 
 boolean newMeterValue = false;      //indicating to various functions that we got a new power meter measurement result
 char printFrame[16];                //part of a frame, to be printed on LCD
 //Classes
+TaskHandle_t Task0;
 hw_timer_t *My_timer = NULL;
 LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 WebServer server(80);
 //Multiplus variables
+short   multiplusESSpower = 0;                  //ESS power value currently applied in Multiplus
+float   multiplusTemp = 11.1;
+float   multiplusDcCurrent = -22.2;
+int16_t multiplusAh = -12345;
+byte    multiplusStatus80 = 23;                 //00=ok, 02=battery low
+byte    multiplusVoltageStatus;                 //11=ACin_disconnected, 12=inverter_off, 13=Battery_good_inverter_on, 17=Moment_of_ACin_interruption, 19=Moment_of_ACin_back_on
+byte    multiplusEmergencyPowerStatus;          //00=mains, 02=in_emergency_power_mode (=state of ACin relay)
 byte    masterMultiLED_LEDon = 123;             //Bits 0..7 = mains on, absorption, bulk, float, inverter on, overload, low battery, temperature
 byte    masterMultiLED_LEDblink = 234;          //(LEDon=1 && LEDblink=1) = blinking; (LEDon=0 && LEDblink=1) = blinking_inverted 
 byte    masterMultiLED_Status = 12;             //0=ok, 2=battery low
@@ -141,15 +146,6 @@ float   masterMultiLED_MinimumInputCurrentLimit;
 float   masterMultiLED_MaximumInputCurrentLimit;//for details on MasterMultiLED frame see Victron MK2 protocol PDF
 float   masterMultiLED_ActualInputCurrentLimit;
 byte    masterMultiLED_SwitchRegister;          //See Victron MK2 manual chapter 6.2; bits: 0x01=Charger_on_received, 0x02=Inverter_on_received, 0x10=Charger_finally_on, 0x20=Inverter_finally_on
-float   multiplusTemp = 11.1;
-float   multiplusDcCurrent = -22.2;
-int16_t multiplusAh = -12345;
-byte    multiplusStatus80 = 23;                 //00=ok, 02=battery low
-byte    multiplusVoltageStatus;                 //11=ACin_disconnected, 12=inverter_off, 13=Battery_good_inverter_on, 17=Moment_of_ACin_interruption, 19=Moment_of_ACin_back_on
-byte    multiplusEmergencyPowerStatus;          //00=mains, 02=in_emergency_power_mode (=state of ACin relay)
-
-TaskHandle_t Task0;
-
 
 
 
@@ -167,7 +163,7 @@ TaskHandle_t Task0;
 //Symbols used in ISR:
 volatile int cmdAckCnt = 0;                 //counter down-counting the time it takes for Multiplus acknowledging an ESS command
 volatile int debounceCnt = 2*CPS;           //start reacting on button 2 seconds after reboot
-volatile int essCnt = 0;                    //settling time counter while Multiplus applying new ESS power
+volatile int multiplusSettlingCnt = 0;                    //settling time counter while Multiplus applying new ESS power
 volatile int essMinuteCounter = ONE_MINUTE; //Multiplus disables ESS if no value is written within 72 seconds
 volatile int socWatchdog = 20000;           //timer to turn off Multiplus in case there was no SOC received from battery; start with 2 seconds, so that no CAN bus error is displayed on reboot
 volatile int specialModeCnt = SWITCH_MODE_DURATION;   //timer to automatically turn off special mode after XX minutes
@@ -194,7 +190,7 @@ void IRAM_ATTR onTimer()
 {
   if (essMinuteCounter > 0) essMinuteCounter--;
   if (debounceCnt > 0) debounceCnt--;
-  if (essCnt > 0) essCnt--;
+  if (multiplusSettlingCnt > 0) multiplusSettlingCnt--;
   if (cmdAckCnt > 0) cmdAckCnt--;
   if (socWatchdog > 0) socWatchdog--;     //watchdog timer ensuring that SOC value is received from battery
   if (specialModeCnt > 0) specialModeCnt--;   //Comment out to keep Special Mode infintitely until next button press
@@ -469,6 +465,25 @@ void convertFrameToHEXstring(char *inbuf, char *outstr, int length)
         outstr[j] = 0;
 }
 
+int estimateMultiplusPowerSettling(short essPowerOld, short essPowerNew)
+{
+  int settling = SETTLING_OFFSET;
+  if (((essPowerOld<0) && (essPowerNew<0)) || ((essPowerOld>0) && (essPowerNew>0)))
+  { //if power change is not crossing zero, meaning it either keeps charging or discharging
+    short pdif = abs(essPowerNew)-abs(essPowerOld);
+    if (pdif>0) settling += pdif*CPS/SETTLING_INCREASE; else settling += -pdif*CPS/SETTLING_DECREASE;   //increase with 360 W/s; decrease with 1200 W/s
+  }
+  else
+  { //power change is crossing through zero, so essPowerOld has to be decreased and essPowerNew has to be increased
+    settling += abs(essPowerOld)*CPS/SETTLING_DECREASE;  //decrease part
+    settling += abs(essPowerNew)*CPS/SETTLING_INCREASE;  //decrease part
+  }
+  if (abs(essPowerNew) <= SETTLING_THRS2) settling += SETTLING_THRS_ADDON;  //additional settling time for target powers >=200W
+  if (abs(essPowerNew) <= SETTLING_THRS1) settling += SETTLING_THRS_ADDON;  //even more settling time if target power >= 100W
+  if (settling > SETTLING_MAX) settling = SETTLING_MAX;                   //Limit to settling time maximum
+  return settling;
+}
+
 //true if frame was known, false if unknown
 bool decodeVEbusFrame(char *frame, int len)
 {
@@ -517,10 +532,16 @@ bool decodeVEbusFrame(char *frame, int len)
             if ((veCmdSendState==0x12) && (cmdAckCnt > 0))    //if ACK was received in time
             {
               //debugEvaluate(cmdAckCnt);     //evaluate ACK timer position for debug purposes
-              veCmdSendState = 0;          //sending command is done
+              //calculate settling time Multiplus requires for changing ESS power to new value
+              int settling = estimateMultiplusPowerSettling(multiplusESSpower, essPowerDesired);
+              multiplusSettlingCnt = settling;    //apply/start calculated settling time
+              multiplusESSpower = essPowerDesired;   //Update ESS power value successfully applied in Multiplus
+              //Write SOC, applied ESS power, and relative time when settling ends to logfile:
+              addToLogfile(" "+String(soc)+"% "+String(multiplusESSpower)+"W "+String((relTime+settling/(CPS/10))%1000));
               essMinuteCounter = ONE_MINUTE;    //restart ESS one-minute counter
+              veCmdSendState = 0;          //sending command is done
             }
-            result = true; //We ignore our ACK frame for now... TBD
+            result = true; //mark as known frame
           }
           break;
         }
@@ -566,12 +587,12 @@ bool decodeVEbusFrame(char *frame, int len)
 // Documentation of this function is here:
 // https://github.com/pv-baxi/esp32ess/blob/main/docs/README.md#vebus-receive-frames
 // ===========================================================================
-void multiplusCommandHandling()
+void veCmdTimeoutHandling()
 {
   //Check if command acknowledge time is over. If yes, trigger to resend command
   if (((veCmdSendState & 0x10)==0x10) && (cmdAckCnt <= 0))
   {
-    veCmdSendState = veCmdSendState & 0x0F;   //ready to re-send
+    veCmdSendState = veCmdSendState & 0x0F;       //Re-send command
     veTxCmdFailCnt++;     //increase failed commands counter
     addToLogfile("\nFAIL cmd "+String(veCmdSendState,HEX));
   }
@@ -623,36 +644,21 @@ void multiplusCommandHandling()
 //  -> Multiplus will charge the battery from ACout2 with 100W
 //  -> thus the resulting consumption on ACin is 300W
 // ===========================================================================
-void applyNewEssPower(short power)
+bool applyNewEssPower(short power)
 {
-  short essPowerPrevious = essPower;   //backup current essPower value for comparison reasons
-  essPower = power;               //set new desired ESS power
-  veCmdSendState = 2;            //force sending ESS command
-  //Always do setting. If there was no change in essPower, setting is only as long as SETTLING_OFFSET.
-  int settling = SETTLING_OFFSET;
-  if (((essPowerPrevious<0) && (essPower<0)) || ((essPowerPrevious>0) && (essPower>0)))
-  { //if power change is not crossing zero, meaning it either keeps charging or discharging
-    short pdif = abs(essPower)-abs(essPowerPrevious);
-    if (pdif>0) settling += pdif*CPS/SETTLING_INCREASE; else settling += -pdif*CPS/SETTLING_DECREASE;   //increase with 360 W/s; decrease with 1200 W/s
+  if ((veCmdSendState == 0) && (multiplusSettlingCnt<=0)) {  //Last check that we're good to send new value
+    essPowerDesired = power;
+    veCmdSendState = 2;            //force sending ESS command
+    return true;
   }
-  else
-  { //power change is crossing through zero, so essPowerPrevious has to be decreased and essPower has to be increased
-    settling += abs(essPowerPrevious)*CPS/SETTLING_DECREASE;  //decrease part
-    settling += abs(essPower)*CPS/SETTLING_INCREASE;  //decrease part
-  }
-  if (abs(essPower) <= SETTLING_THRS2) settling += SETTLING_THRS_ADDON;  //additional settling time for target powers >=200W
-  if (abs(essPower) <= SETTLING_THRS1) settling += SETTLING_THRS_ADDON;  //even more settling time if target power >= 100W
-  if (settling > SETTLING_MAX) settling = SETTLING_MAX;                   //Limit to settling time maximum
-  essCnt = settling;    //apply/start calculated settling time
-  //Write SOC, applied ESS power, and relative time when settling ends to logfile:
-  addToLogfile(" "+String(soc)+"% "+String(essPower)+"W "+String((relTime+settling/(CPS/10))%1000));
+  else return false;
 }
 
 
 // ===========================================================================
 //            Limit new ESS power based on SOC and mode options
 // ---------------------------------------------------------------------------
-// This function limits the desired ESS power in variable essPowerNew based
+// This function limits the desired ESS power in variable essPowerTmp based
 // on the current battery level and the mode option switches.
 // So if the battery is full, we don't allow (extra-)charging anymore. If the
 // battery is empty, we don't allow (extra-)discharge. Also (extra-)charging
@@ -699,12 +705,12 @@ short limitNewEsspower(short power)
 // ===========================================================================
 inline void calculateNewESSpower()
 {
-  essPowerNew = essPower + round(essR * meterPower);   //calculate new EES power based on meter value and new direction R
-  essPowerNew += ESS_POWER_OFFSET;   //add small offset (to always feed little bit more into the grid)
+  essPowerTmp = multiplusESSpower + round(essR * meterPower);   //calculate new EES power based on meter value and new direction R
+  essPowerTmp += ESS_POWER_OFFSET;   //add small offset (to always feed little bit more into the grid)
   //limit to maximum positive and negative power
-  if (essPowerNew > DISCHARGE_LIMIT) essPowerNew = DISCHARGE_LIMIT;
-  if (essPowerNew < -CHARGE_LIMIT) essPowerNew = -CHARGE_LIMIT;
-  essPowerNew = limitNewEsspower(essPowerNew);  //Limit new ESS power based on SOC and mode options
+  if (essPowerTmp > DISCHARGE_LIMIT) essPowerTmp = DISCHARGE_LIMIT;
+  if (essPowerTmp < -CHARGE_LIMIT) essPowerTmp = -CHARGE_LIMIT;
+  essPowerTmp = limitNewEsspower(essPowerTmp);  //Limit new ESS power based on SOC and mode options
 }
 
 // ===========================================================================
@@ -736,8 +742,7 @@ inline void calculateNewESSpower()
 void updateMultiplusPower_usingAbsoluteMeter()
 {
   if (newMeterValue) {
-    newMeterValue = false;    //reset flag
-    if (essCnt <= 0) {
+    if (multiplusSettlingCnt <= 0) {
       //Here we had a new meter value and settling is over:
       if (secondMeasurement) {
         //If this was the second measurement after settling:
@@ -745,24 +750,24 @@ void updateMultiplusPower_usingAbsoluteMeter()
         //First determine if we keep direction or better go into opposite direction:
         if (meterPower >= meterPowerOld) essR = -essR; //if electric meter difference got worse or stayed equal, swap direction for the following ESS power update
         //Calculate new ESS power:
-        //addToLogfile(String(essPower));
+        //addToLogfile(String(multiplusESSpower));
         //here difference was small enough, so let's continue
         meterPowerOld = meterPower; //remember current meter value for later comparison if we got better or worse
-        //we can now calculate the new essPower. It's safe to change the value several times, as not used in ISR
+        //we can now calculate the new ESS power.
         calculateNewESSpower();
-        //if limitation would result in zero change of essPower, try other direction
-        if (essPowerNew == essPower)
+        //if limitation would result in zero change of multiplusESSpower, try other direction
+        if (essPowerTmp == multiplusESSpower)
         {
           essR = -essR;           //change direction
           calculateNewESSpower(); //calculate ESS power again
         }
         //in case we are at an outer limit, only step by small amount of Watt first
-        if ((essPower==0) && (soc >= SOC_LIMIT_UPPER) && (essPowerNew > SOC_LIMIT_UPPER_STEP)) essPowerNew = SOC_LIMIT_UPPER_STEP;                    //discharge step in case battery full
-        if ((essPower==0) && (soc <= SOC_LIMIT_LOWER) && (essPowerNew < -SOC_LIMIT_LOWER_STEP)) essPowerNew = -SOC_LIMIT_LOWER_STEP;                  //charge step in case battery empty
-        if ((essPower==0) && (!extraCharge) && (essPowerNew > NO_CHARGE_MODE_STEP)) essPowerNew = NO_CHARGE_MODE_STEP;                              //discharge step in case No-Charge-Mode
-        if ((essPower==DISCHARGE_LIMIT) && (essPowerNew < DISCHARGE_LIMIT-DISCHARGE_LIMIT_STEP)) essPowerNew = DISCHARGE_LIMIT-DISCHARGE_LIMIT_STEP; //step away from discharge-limit (+)
-        if ((essPower==-CHARGE_LIMIT) && (essPowerNew > -CHARGE_LIMIT+CHARGE_LIMIT_STEP)) essPowerNew = -CHARGE_LIMIT+CHARGE_LIMIT_STEP;             //step away from charge-limit (-)
-        applyEssPowerNew = true;    //set flag to apply essPowerNew as soon as possible
+        if ((multiplusESSpower==0) && (soc >= SOC_LIMIT_UPPER) && (essPowerTmp > SOC_LIMIT_UPPER_STEP)) essPowerTmp = SOC_LIMIT_UPPER_STEP;                    //discharge step in case battery full
+        if ((multiplusESSpower==0) && (soc <= SOC_LIMIT_LOWER) && (essPowerTmp < -SOC_LIMIT_LOWER_STEP)) essPowerTmp = -SOC_LIMIT_LOWER_STEP;                  //charge step in case battery empty
+        if ((multiplusESSpower==0) && (!extraCharge) && (essPowerTmp > NO_CHARGE_MODE_STEP)) essPowerTmp = NO_CHARGE_MODE_STEP;                              //discharge step in case No-Charge-Mode
+        if ((multiplusESSpower==DISCHARGE_LIMIT) && (essPowerTmp < DISCHARGE_LIMIT-DISCHARGE_LIMIT_STEP)) essPowerTmp = DISCHARGE_LIMIT-DISCHARGE_LIMIT_STEP; //step away from discharge-limit (+)
+        if ((multiplusESSpower==-CHARGE_LIMIT) && (essPowerTmp > -CHARGE_LIMIT+CHARGE_LIMIT_STEP)) essPowerTmp = -CHARGE_LIMIT+CHARGE_LIMIT_STEP;             //step away from charge-limit (-)
+        applyNewEssPower(essPowerTmp);  //apply essPowerTmp to Multiplus
       }
       else {
         //If this was the first measurement after settling:
@@ -793,13 +798,13 @@ void updateMultiplusPower_usingAbsoluteMeter()
 void avoidMultiplusTimeout()
 {
   //Check if ESS power value was not re-written into Multiplus for more than 60 seconds
-  if ((essMinuteCounter <= 0) && (veCmdSendState==0))
+  if ((essMinuteCounter <= 0) && (multiplusSettlingCnt<=0) && (veCmdSendState==0))
   {
     addToLogfile("\n"+String(relTime)+" timeout");
     //Also in this case react on reached SOC limits:
-    essPowerNew = limitNewEsspower(essPower);         //Limit current ESS power based on SOC and mode options
-    applyEssPowerNew = true;    //set flag to apply essPowerNew as soon as possible
-    if (essPowerNew != essPower) addToLogfile(" + SOC limit");    //In case this happens, write into the same logfile line
+    essPowerTmp = limitNewEsspower(multiplusESSpower);         //Limit current ESS power based on SOC and mode options
+    applyNewEssPower(essPowerTmp);  //apply essPowerTmp to Multiplus
+    if (essPowerTmp != multiplusESSpower) addToLogfile(" + SOC limit");    //In case this happens, write into the same logfile line
   }
 }
 
@@ -863,7 +868,7 @@ void batteryHandling()
         }
         socWatchdog = SOC_WATCHDOG_CYCLES;  //reset watchdog timer
         soc = message.data[0];         //get battery SOC from CAN message
-        debugEvaluate(soc, SOC_LIMIT_EMERGENCY, 101 );  //log min/max and stop writing logfile soon if battery reached critical level (min,max)
+        debugEvaluate(soc, SOC_LIMIT_LOWEST, 101 );  //log min/max and stop writing logfile soon if battery reached critical level (min,max)
       }
     }
   }
@@ -871,8 +876,6 @@ void batteryHandling()
   if ((soc >= 0) && (socWatchdog <= 0))
   {
     soc = -1;                 //set SOC negative, to indicate that it is invalid
-    essPowerNew = 0;          //set Multiplus to 0W
-    applyEssPowerNew = true;  //set flag to apply essPowerNew as soon as possible
     addToLogfile("\n"+String(relTime)+" Battery CAN bus FAIL");
   }
 }
@@ -888,6 +891,7 @@ void batteryHandling()
 // ===========================================================================
 void checkImpulsePowerMeter()
 {
+  newMeterValue = false; //Here the meter value is not new anymore
   if (isrNewMeterPulse)  //if we got new power meter impulse from ISR
   {
     isrNewMeterPulse = false;  //reset flag
@@ -934,10 +938,10 @@ void onNewMeterValue()
     // If difference to previous meter value is very large, it just might just be a sudden power spike (e.g. from a device turning on).
     // In case we're well in the settling, high power differences are normal and can be ignored. In case settling was already (or nearly)
     // over, settling time is extended again:
-    if ((abs(meterPower-meterPowerPrevious) >= MAX_METER_DIFFERENCE) && (essCnt < SETTLING_IGNORE_PWR_SPIKE))
+    if ((abs(meterPower-meterPowerPrevious) >= MAX_METER_DIFFERENCE) && (multiplusSettlingCnt < SETTLING_IGNORE_PWR_SPIKE))
     {
-      essCnt = SETTLING_IGNORE_PWR_SPIKE;
-      addToLogfile(" spike "+String((relTime+essCnt/(CPS/10))%1000));
+      multiplusSettlingCnt = SETTLING_IGNORE_PWR_SPIKE;
+      addToLogfile(" spike "+String((relTime+multiplusSettlingCnt/(CPS/10))%1000));
     }
   }
 }
@@ -945,23 +949,33 @@ void onNewMeterValue()
 
 void automaticChargerOnlySwitching()
 {
-  if ((veCmdSendState == 0) && (essCnt<=0)) {
+  //first check if supply emergency power right now. If yes, automatically switch to 'E'-Mode.
+  if (multiplusEmergencyPowerStatus==0x02) switchSpecialModes('E');
+  //Now check if the working mode of the Multiplus needs to be changed for some reason.
+  if ((veCmdSendState == 0) && (multiplusSettlingCnt<=0)) {
     if (forceChargeOnlyMode) {
-      if ((masterMultiLED_SwitchRegister & 0x30) == 0x30) {
-        veCmdSendState = 0x05;   //If inverter on, force switching to charger-only-mode
-        essCnt = SETTLING_MODE_CHANGE;    //Wait some time...
+      if ((masterMultiLED_SwitchRegister & 0x30) != 0x10) {
+        veCmdSendState = 0x05;   //If not in charger-only mode, force switching to it
+        multiplusSettlingCnt = SETTLING_MODE_CHANGE;    //Wait some time...
         addToLogfile("\nSwitch to Charger-only due to force-flag");
       }
     }
-    else {
+    else if (switchMode=='E') {
+      if ((masterMultiLED_SwitchRegister & 0x30) != 0x30) {
+        veCmdSendState = 0x07;   //If not in Inverter+Charger mode, force switching to it
+        multiplusSettlingCnt = SETTLING_MODE_CHANGE;    //Wait some time...
+        addToLogfile("\nSwitch to Inverter+Charger due to 'E'-mode");
+      }
+    }
+    else {  //if we are not in any special force-mode:
       if ((soc>=0) && (soc<SOC_BELOW_CHARGE_ONLY) && ((masterMultiLED_SwitchRegister&0x30)==0x30)) {
         veCmdSendState = 0x05; //switch to charger-only-mode
-        essCnt = SETTLING_MODE_CHANGE;    //Wait some time...
+        multiplusSettlingCnt = SETTLING_MODE_CHANGE;    //Wait some time...
         addToLogfile("\nSwitch to Charger-only mode");
       }
       if ((soc>=SOC_DISCHARGE_ALLOWED) && ((masterMultiLED_SwitchRegister&0x30)==0x10)) {
         veCmdSendState = 0x07;            //switch to charger+inverter mode
-        essCnt = SETTLING_MODE_CHANGE;    //Wait some time...
+        multiplusSettlingCnt = SETTLING_MODE_CHANGE;    //Wait some time...
         addToLogfile("\nSwitch to Charger+Inverter mode");
       }
     }
@@ -983,7 +997,7 @@ void switchSpecialModes(char desiredMode)
   if (desiredMode==0) {
     //Here, function was called from main loop.
     //Time-limited modes: Check, if we are in such mode and duration is over:
-    if ((switchMode=='!') && (specialModeCnt<=0))    //if (((switchMode=='!') || (switchMode=='n')) && (specialModeCnt<=0))
+    if (((switchMode=='!') || (switchMode=='E'))    && (specialModeCnt<=0))
     {
       switchMode = SWITCH_MODE_DEFAULT;
       switchModeChanged = true;           //flag to apply mode below
@@ -993,11 +1007,12 @@ void switchSpecialModes(char desiredMode)
     boolean bootButton = digitalRead(0);
     if ((bootButton == 0) && (debounceCnt <= 0))    //if button has been pressed and debouncing period is over
     {
-      if (switchMode == '!') switchMode = 'N';        //N = Normal Mode
+      if (switchMode == 'E') switchMode = 'N';        //N = Normal Mode
       else if (switchMode == 'N') switchMode = 'n';   //n = no-extra-Charge-Mode
       else if (switchMode == 'n') switchMode = '0';   //0 = 0W Charge+Discharge Mode
       else if (switchMode == '0') switchMode = 'C';   //5 = 0W Charger-only Mode
       else if (switchMode == 'C') switchMode = '!';   //! = Low-SOC charge mode
+      else if (switchMode == '!') switchMode = 'E';   //! = Emergency-Power mode
       debounceCnt = BUTTON_DEBOUNCE_TIME;     //3000 = 300ms
       specialModeCnt = SWITCH_MODE_DURATION;  //always start timer. If mode automatically ends or not, depends on code above.
       switchModeChanged = true;               //flag to apply mode below
@@ -1016,18 +1031,15 @@ void switchSpecialModes(char desiredMode)
       {
         extraCharge = true;           //allow (extra) charging
         extraDischarge = true;        //allow (extra) discharging
-        lowerEmergencySoc = false;    //normal battery levels
         forceChargeOnlyMode = false;  //allow Inverter+Charger enabled
         addToLogfile("\n-> enter Normal Mode");
         break;
       }
-      case '!':    // Low-SOC mode: Use to recharge battery in case Multiplus was turned off due to SOC_LIMIT_EMERGENCY
+      case '!':    // Low-SOC mode: Use to recharge battery in case Multiplus was turned off due to SOC_LIMIT_LOWEST
       {
         extraCharge = true;           //allow (extra) charging
         extraDischarge = false;       //as this mode is intended for charging, don't allow to extra-discharge battery
-        lowerEmergencySoc = true;     //BE CAREFUL! Only allow in this time-limited mode.
         forceChargeOnlyMode = true;   //force Charger-Only mode
-        //veCmdSendState = 0x05;
         addToLogfile("\n-> enter Low-SOC-Mode");
         break;
       }
@@ -1035,7 +1047,6 @@ void switchSpecialModes(char desiredMode)
       {
         extraCharge = false;          //don't allow extra charging
         extraDischarge = false;       //don't allow extra discharging
-        lowerEmergencySoc = false;    //normal battery levels
         forceChargeOnlyMode = false;  //allow Inverter+Charger enabled
         addToLogfile("\n-> enter 0W ON Mode");
         break;
@@ -1044,17 +1055,22 @@ void switchSpecialModes(char desiredMode)
       {
         extraCharge = false;          //don't allow extra charging
         extraDischarge = false;       //don't allow extra discharging
-        lowerEmergencySoc = false;    //normal battery levels
         forceChargeOnlyMode = true;   //force Charger-Only mode
-        //veCmdSendState = 0x07;
         addToLogfile("\n-> enter 0W ChargerOnly Mode");
+        break;
+      }
+      case 'E':    // Emergency-Power mode (force Charger+Inverter mode)
+      {
+        extraCharge = false;          //don't allow extra charging
+        extraDischarge = false;       //don't allow extra discharging
+        forceChargeOnlyMode = false;  //force Charger-Only mode
+        addToLogfile("\n-> enter Emergency-Power mode");
         break;
       }
       case 'n':    // no-extra-Charge-Mode: Useful with ACout-wiring if PV is completely connected to ACout.
       {           //                Also useful with problematic devices on absolute power meter (not providing consumption / feed-in direction)
         extraCharge = false;          //no extra charging
         extraDischarge = true;        //allow (extra) discharging
-        lowerEmergencySoc = false;    //normal battery levels
         forceChargeOnlyMode = false;  //allow Inverter+Charger enabled
         addToLogfile("\n-> enter no-extra-Charge-Mode");
         break;
@@ -1102,7 +1118,7 @@ void updateDisplays()
     lcd.print("/");
     lcd.print(veRxCmdFailCnt);
     lcd.print(" ");
-    lcd.print(essCnt);
+    lcd.print(multiplusSettlingCnt);
     lcd.print("  ");
         //Print if logged into WiFi or not
     lcd.setCursor(17, 1);
@@ -1120,7 +1136,7 @@ void updateDisplays()
     lcd.setCursor(10, 2);
     lcd.print("ESS:      ");
     lcd.setCursor(14, 2);
-    lcd.print(essPower);
+    lcd.print(multiplusESSpower);
     lcd.print("W");
     //print other debug information
     lcd.setCursor(0, 3);
@@ -1217,7 +1233,7 @@ void handleRoot() {
     webpage += "Battery:    CAN bus connection failure! Multiplus disabled.<br>";
   }
   webpage += "PowerMeter: "+String(meterPower)+"W<br>";
-  webpage += "ESS power:  "+String(essPower)+"W<br>";
+  webpage += "ESS power:  "+String(multiplusESSpower)+"W<br>";
   webpage += "<br>";
   webpage += "<table>";
   webpage += "<tr><th>charger</th><th>inverter</th></tr>";
@@ -1359,7 +1375,7 @@ void veBusHandling(void * parameter)
           if ((veCmdSendState > 0) && !(veCmdSendState & 0x10)){    //if a new VE.Bus command is waiting to be sent (excluding acknowledgements)
             //build desired command
             int len = 0;
-            if (veCmdSendState == 2) len = prepareESScommand(txbuf1, essPower, (frameNr+1) & 0x7F); //write new ESS power
+            if (veCmdSendState == 2) len = prepareESScommand(txbuf1, essPowerDesired, (frameNr+1) & 0x7F); //write new ESS power
             else                     len = prepareSwitchCommand(txbuf1, veCmdSendState, (frameNr+1) & 0x7F);//7=Normal 6=InvertOnly 5=ChargeOnly 4=Standby
             //postprocess command
             len = commandReplaceFAtoFF(txbuf2, txbuf1, len);
@@ -1407,22 +1423,21 @@ void veBusHandling(void * parameter)
 //                                          |_|    
 // #################################################
 void loop() {
-  automaticChargerOnlySwitching();
-  multiplusCommandHandling();                 //Multiplus VEbus: Process VEbus information and execute command-sending state machine
+  automaticChargerOnlySwitching();            //Switch Multiplus into ChargerOnly-Mode if battery is below specific level
+  veCmdTimeoutHandling();                     //Multiplus VEbus: Process VEbus information and execute command-sending state machine
   batteryHandling();                          //Battery: Get new battery level (SOC value) from CAN bus, if available
   checkImpulsePowerMeter();                   //Impulse power meter: Check if new 1/10000kWh impulse is available and calculate meter value
   onNewMeterValue();                          //Power meter: If available, add new meter value to logfile and detect power spikes
-  updateMultiplusPower_usingAbsoluteMeter();  //Calculate new Multiplus ESS power value from meter value
-  if ((soc > SOC_LIMIT_EMERGENCY) || (lowerEmergencySoc && (soc >= (SOC_LIMIT_EMERGENCY-1)))) {
-    //If battery is above minimum charge level or battery is lower, but we are in lowerEmergencySoc-Mode
-    avoidMultiplusTimeout();            //Ensures that at least every minute Multiplus gets an ESS command. Otherwise it will turn off.
-    if ((applyEssPowerNew) && (veCmdSendState==0)) {   //If there is a new ESS power to be written into Multiplus:
-      if (lowerEmergencySoc) {                  //In case we are in lowerEmergencySoc-Mode, always charge with 300W
-        essPowerNew = limitNewEsspower(-300);   //Limit ESS power based on SOC and mode options
+  if ((soc > SOC_LIMIT_LOWEST) || ((switchMode=='!') && (soc >= (SOC_LIMIT_LOWEST-1)))) {   //This is a 2nd safety check to not undercharge the battery
+    //If battery is above minimum charge level, or battery is lower but we are in switchMode "!"
+    if (switchMode=='!') {
+      if (multiplusESSpower!=-300) {                  //avoid sending the same ESS power over and over again
+        essPowerTmp = limitNewEsspower(-300);         //Limit ESS power based on SOC and mode options
+        applyNewEssPower(essPowerTmp);                //write essPowerTmp into Multiplus
       }
-      applyEssPowerNew = false;          //reset flag
-      applyNewEssPower(essPowerNew);     //write essPowerNew into Multiplus
     }
+    else updateMultiplusPower_usingAbsoluteMeter(); //Evaluate absolute meter power, and if applicable, apply new ESS power value
+    avoidMultiplusTimeout();                        //Ensures that at least every minute Multiplus gets an ESS command. Otherwise it will turn off.
   }
   switchSpecialModes(0);                      //handle BOOT button press activities (GPIO0)
   updateDisplays();                           //update Display and LEDs
