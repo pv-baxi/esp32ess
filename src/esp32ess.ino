@@ -162,8 +162,13 @@ float   masterMultiLED_MaximumInputCurrentLimit;//for details on MasterMultiLED 
 float   masterMultiLED_ActualInputCurrentLimit;
 byte    masterMultiLED_SwitchRegister;          //See Victron MK2 manual chapter 6.2; bits: 0x01=Charger_on_received, 0x02=Inverter_on_received, 0x10=Charger_finally_on, 0x20=Inverter_finally_on
 //Power meter variables
-byte    pmStatus = 0;
-char    pmDeviceId[10];                         //Power meter device ID (we assume 10 bytes)
+char     electricMeter_DeviceID[10];                         //electric meter device ID (we assume 10 bytes)
+char     electricMeter_Status180[3];                         //Status sent with 1.8.0 (consumption)
+char     electricMeter_Status280[3];                         //Status sent with 2.8.0 (feed-in)
+int32_t  electricMeter_Consumption = 0;                      //kWh value 1.8.0
+int32_t  electricMeter_FeedIn = 0;                           //kWh value 2.8.0
+uint32_t electricMeter_Runtime = 0;                          //meter runtime in seconds
+
 
 
 
@@ -521,7 +526,7 @@ bool decodeVEbusFrame(char *frame, int len)
             result = true; //known frame
             multiplusStatus80 = frame[7];
             multiplusVoltageStatus = frame[6];
-            int16_t t = 256*frame[10] + frame[9];
+            int16_t t = (frame[10]<<8) + frame[9];
             multiplusDcCurrent = t/10.0;
             multiplusEmergencyPowerStatus = frame[12];
             if ((frame[11] & 0xF0) == 0x30) multiplusTemp = frame[15]/10.0;
@@ -539,7 +544,7 @@ bool decodeVEbusFrame(char *frame, int len)
         {
           if ((len==15) && (frame[5]==0x81) && (frame[6]==0x64) && (frame[7]==0x14) && (frame[8]==0xBC) && (frame[9]==0x02) && (frame[12]==0x00))
           {
-            multiplusAh = 256*frame[11] + frame[10];  //maybe value is also 24bit including frame[12]?
+            multiplusAh = (frame[11]<<8) + frame[10];  //maybe value is also 24bit including frame[12]?
             result = true; //known frame
           }
           break;
@@ -571,11 +576,11 @@ bool decodeVEbusFrame(char *frame, int len)
             masterMultiLED_LEDblink = frame[7];
             masterMultiLED_Status = frame[8];
             masterMultiLED_AcInputConfiguration = frame[9];
-            int16_t t = 256*frame[11] + frame[10];
+            int16_t t = (frame[11]<<8) + frame[10];
             masterMultiLED_MinimumInputCurrentLimit = t/10.0;
-            t = 256*frame[13] + frame[12];
+            t = (frame[13]<<8) + frame[12];
             masterMultiLED_MaximumInputCurrentLimit = t/10.0;
-            t = 256*frame[15] + frame[14];
+            t = (frame[15]<<8) + frame[14];
             masterMultiLED_ActualInputCurrentLimit = t/10.0;
             masterMultiLED_SwitchRegister = frame[16];
             //Check if mode was changed in time
@@ -991,10 +996,13 @@ bool searchAndReadSMLentry(char* smlBuffer, char* searchString, int searchString
     //skip (skiprows) rows in that list, INCLUDING the row contained in the searchString
     for (int row=0; row<skiprows; row++) i += (smlBuffer[i] & 0x0F); //low-nibble in first byte of row contains how many bytes to skip
     //now we point to the desired row
+
     int len = (smlBuffer[i++] & 0x0F) - 1;    //get data length of row
     if (len > maxBytesRead) len = maxBytesRead;
-    for (int j=0; j<len; j++) resultDest[j]=smlBuffer[i++];  //read following len bytes
-    success = true;
+    if (i+len-1 <= searchEndIndex) {  //check that we are not accessing bytes outside the SML message...
+      for (int j=0; j<len; j++) resultDest[j]=smlBuffer[i++];  //read following len bytes
+      success = true;
+    }
   }
   return success;
 }
@@ -1031,20 +1039,42 @@ void checkSMLpowerMeter()
       sBuf2[smlLength-2] = sBuf[CIR&(smlp-1)];
       sBuf2[smlLength-1] = sBuf[CIR&(smlp-0)];
       //verify CRC
-      int16_t smlCRC = 256*sBuf2[smlLength-1] + sBuf2[smlLength-2];    //get CRC from the received stream
+      int16_t smlCRC = (sBuf2[smlLength-1]<<8) + sBuf2[smlLength-2];    //get CRC from the received stream
       if (smlCRC == crc.calc()) {     //If CRC is matching
         smlLengthDisplay = 15;  //display SML length 15 times on display, then vanish again
-        if (smlLength == 256) {
-          //decode SML stream
-          //Device ID
-          char searchString[] = {0x77,0x07,0x01,0x00,0x00,0x00,0x09,0xFF};
-          searchAndReadSMLentry(sBuf2, searchString, sizeof(searchString), 0, smlLength-1, 1, 5, pmDeviceId, 10);
-          //09 10 11 12   13 14 15
-          //08 00 FF 64 ! 01 02 80   //search meter status
-          //if (sBuf2[142]==sBuf2[205]) pmStatus = sBuf2[142];   //if both status values are identical, save status
+        //decode SML stream
+        //Device ID
+        char searchString0[] = {0x77,0x07,0x01,0x00,0x00,0x00,0x09,0xFF};
+        searchAndReadSMLentry(sBuf2, searchString0, sizeof(searchString0), 0, smlLength-1, 1, 5, electricMeter_DeviceID, 10);
+        //Status 1.8.0
+        char searchString1[] = {0x77,0x07,0x01,0x00,0x01,0x08,0x00,0xFF};
+        searchAndReadSMLentry(sBuf2, searchString1, sizeof(searchString1), 0, smlLength-1, 1, 1, electricMeter_Status180, 3);
+        //Consumption 1.8.0 (same searchString as Status 1.8.0)
+        char temp[4];
+        if (searchAndReadSMLentry(sBuf2, searchString1, sizeof(searchString1), 0, smlLength-1, 1, 5, temp, 4)) {
+          electricMeter_Consumption = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
         }
-        else {
-          addToLogfile("\nVerified SML with unknown length ("+String(smlLength)+") received");
+        //Status 2.8.0
+        char searchString2[] = {0x77,0x07,0x01,0x00,0x02,0x08,0x00,0xFF};
+        searchAndReadSMLentry(sBuf2, searchString2, sizeof(searchString2), 0, smlLength-1, 1, 1, electricMeter_Status280, 3);
+        //Feed-in 2.8.0 (same searchString as Status 2.8.0)
+        temp[4];
+        if (searchAndReadSMLentry(sBuf2, searchString2, sizeof(searchString2), 0, smlLength-1, 1, 5, temp, 4)) {
+          electricMeter_FeedIn = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
+        }
+        //Runtime
+        char searchString3[] = {0x72,0x62,0x01,0x65};
+        temp[4];
+        if (searchAndReadSMLentry(sBuf2, searchString3, sizeof(searchString3), 0, smlLength-1, 1, 1, temp, 4)) {
+          electricMeter_Runtime = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
+        }
+        //Compare both status words
+        if ((electricMeter_Status180[0]!=electricMeter_Status280[0]) ||
+            (electricMeter_Status180[1]!=electricMeter_Status280[1]) ||
+            (electricMeter_Status180[2]!=electricMeter_Status280[2])) {
+          addToLogfile("\nElectric meter status not matching");
+          addFrameToLogfile(electricMeter_Status180,0,2);
+          addFrameToLogfile(electricMeter_Status280,0,2);
         }
       }
     }
@@ -1276,10 +1306,24 @@ void updateDisplays()
     char temp[4];
     for (int i=0;i<7;i++)
     {
-      sprintf(temp,"%02X ",pmDeviceId[i]);
+      sprintf(temp,"%02X ",electricMeter_DeviceID[i]);
       lcd.print(temp);
     }
 }
+
+String secondsToTimeStr(uint32_t seconds)
+{
+  uint32_t t = seconds + 6*60*60 + 56*60 + 15;
+  int s = t % 60;       //get the seconds
+  t = (t - s)/60;
+  int m = t % 60;       //get the minutes
+  t = (t - m)/60;
+  int h = t % 24;       //get the hours
+  char time[9];
+  sprintf(time,"%02d:%02d:%02d",h,m,s);
+  return time;
+}
+
 
 
 // ===========================================================================
@@ -1379,6 +1423,21 @@ void handleRoot() {
   webpage += "VE.Bus TX frames failed: "+String(veTxCmdFailCnt)+"/"+String(veCmdCounter)+"<br>";
   webpage += "VE.Bus RX frames wrong checksum: "+String(veRxCmdFailCnt)+"<br>";
   webpage += "<br>";
+  webpage += "<b>Electric meter</b><br>";
+  webpage += "<table>";
+  webpage += "<tr><td>ID:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_DeviceID[1],HEX)+" "+
+              electricMeter_DeviceID[2]+electricMeter_DeviceID[3]+electricMeter_DeviceID[4]+
+              String((electricMeter_DeviceID[5]&0xF0)>>4,HEX)+String(electricMeter_DeviceID[5]&0x0F,HEX)+" "+
+              String((electricMeter_DeviceID[6]<<24)+(electricMeter_DeviceID[7]<<16)+(electricMeter_DeviceID[8]<<8)+electricMeter_DeviceID[9])+"</td></tr>";
+  webpage += "<tr><td>Consumption:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Consumption)+" kWh</td></tr>";
+  webpage += "<tr><td>Feed-in:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_FeedIn)+" kWh</td></tr>";
+  webpage += "<tr><td>Status 1.8.0:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Status180[0],HEX)+" "+String(electricMeter_Status180[1],HEX)+" "+String(electricMeter_Status180[2],HEX)+"</td></tr>";
+  webpage += "<tr><td>Status 2.8.0:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Status280[0],HEX)+" "+String(electricMeter_Status280[1],HEX)+" "+String(electricMeter_Status280[2],HEX)+"</td></tr>";
+  webpage += "<tr><td>Runtime:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Runtime)+" seconds</td></tr>";
+  webpage += "</table>";
+  webpage += "<br>";
+  webpage += "Time from meter runtime: "+secondsToTimeStr(electricMeter_Runtime)+"<br>";
+  webpage += "<br>";
   webpage += "Battery min: "+String(debugmin)+"<br>";
   webpage += "Battery max: "+String(debugmax)+"<br>";
   webpage += "<br>";
@@ -1386,6 +1445,15 @@ void handleRoot() {
   webpage += String(logfileCounter)+" bytes written since last logfile view";
   webpage += "</font></body></html>";
   server.send(200, "text/html", webpage);
+
+char     electricMeter_DeviceID[10];                         //electric meter device ID (we assume 10 bytes)
+char     electricMeter_Status180[3];                         //Status sent with 1.8.0 (consumption)
+char     electricMeter_Status280[3];                         //Status sent with 2.8.0 (feed-in)
+int32_t  electricMeter_Consumption = 0;                      //kWh value 1.8.0
+int32_t  electricMeter_FeedIn = 0;                           //kWh value 2.8.0
+int32_t  electricMeter_Runtime = 0;                          //meter runtime in seconds
+
+
 }
 
 // ===========================================================================
