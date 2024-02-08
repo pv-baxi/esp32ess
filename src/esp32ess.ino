@@ -25,6 +25,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "driver/twai.h"
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include "CRC16.h"
 
 // ################################################
 //    ____                _              _       
@@ -41,10 +42,13 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //const char* PASSWORD = "your_WiFi_password";
 
 //Other
-const int RS=12, EN=13, D4=4, D5=5, D6=14, D7=15;     //HD44780 text display gpio pins
+const int BUTTON_GPIO = 0;                            //on-devkit-board button is connected to GPIO 0
+const int RS=16, EN=13, D4=4, D5=5, D6=14, D7=15;     //HD44780 text display gpio pins
 const int CAN_RX_PIN = 22, CAN_TX_PIN = 21;           //Pylontech battery CAN = TWAI bus gpio pins
 const int VEBUS_RXD1=26, VEBUS_TXD1=25, VEBUS_DE=27;  //Victron Multiplus VE.bus RS485 gpio pins
 const int METER_IMPULSE_INPUT_PIN = 35;               //input pin from optical 1/10000kWh impulse output of power meter
+const int METER_SML_INPUT_PIN = 34;                   //input pin from optical SML data output of power meter
+const int SML_TXD_UNUSED = 17;                        //some GPIO we need to wire the unused UART TX to
 const int RED_LED = 2;                                //output gpio pin with external red LED (active low)
 const int CPS = 10000;                  //CyclesPerSecond = How often per second our timer ISR is excuted
 const int WAITING_TIME_ACK = 0.9*CPS;   //How long we wait for the ESS command to be acknowledged by Multiplus. Comes normally between 25..43ms, so 1000 = 100ms makes sense
@@ -72,7 +76,8 @@ const int NO_CHARGE_MODE_STEP = 100;    //discharge step away from 0W if in no-c
 const int MAX_METER_DIFFERENCE = 200;   //if difference between current and last measurent > 100W, measure again to ignore short spikes (Watt)
 const int ESS_POWER_OFFSET = 0;         //after each ESS power calculation, add this offset to feed a little bit more into the grid (e.g. +2W)
 const int ONE_MINUTE = 60*CPS;          //as Multiplus ESS is automatically disabled about 72 sec after last command written, lastest after 60 seconds we must re-send current ESS power
-const int BUTTON_DEBOUNCE_TIME = 0.3*CPS;   //3000 = 300ms gives good results
+const int BUTTON_DEBOUNCE_TIME = 0.1*CPS;   //0.1 seconds gives good results
+const int BUTTON_LONGPRESS_TIME = 3.0*CPS;  //3.0 seconds for a longpress
 const int LOGFILE_SIZE = 65510;         //Maximum text buffer that can be sent via HTTP is 65519 byte (2^16 -1 -16)
 const int SOC_WATCHDOG_CYCLES = 2.5*CPS;//time after which Multiplus is turned off in case there was no SOC received from battery (2.5 seconds)
 const char SWITCH_MODE_DEFAULT = '0';    //Default switch mode to start with. For mode numbers see function switchSpecialModes()
@@ -100,7 +105,7 @@ char frbuf1[256];                   //frame without replacement
 char txbuf1[64];                    //buffer for assembling bare command towards Multiplus (without replacements or checksum)
 char txbuf2[64];                    //Multiplus output buffer containing the final command towards Multiplus, including replacements and checksum
 //char str[3*128+1];                //Buffer to temporarily store commands from/to Multiplus in HEX format and send it to SerialMonitor for debugging. +1 for being able to terminate our string with zero
-byte frp = 0;                       //Pointer into Multiplus framebuffer frbuf[] to store received frames.
+uint16_t frp = 0;                   //Pointer into Multiplus framebuffer frbuf[] to store received frames.
 byte frameNr = 0;                   //Last frame number received from Multiplus. Own command has be be sent with frameNr+1, otherwise it will be ignored by Multiplus.
 int veCmdCounter = 0;               //Counts the number of ESS commands sent to Multiplus, including the failed ones.
 short essPowerDesired = 0;          //This value will be written into Multiplus when setting veCmdSendState = 2; negative = charging battery; positive = feed into grid
@@ -125,18 +130,27 @@ int debugmax = -999999;             //used to log maximum battery level
 int8_t soc = -1;                    //State Of Charge = received battery charge level via CAN bus (0..100%), -1 = invalid / not available
 boolean newMeterValue = false;      //indicating to various functions that we got a new power meter measurement result
 char printFrame[16];                //part of a frame, to be printed on LCD
+char sBuf[1024];                    //Circular buffer, stores received SML stream from power meter; Size must be power of 2 and bigger (or equal) than SML_LENGTH_MAX
+uint16_t smlp = 0;                  //Pointer into SML buffer, used as circular pointer
+const int SML_LENGTH_MAX = 512;     //This is the maximum length we allow for the SML stream
+char sBuf2[SML_LENGTH_MAX];         //linear buffer with SML stream
+uint16_t smlCnt = 0;                //counter to count length of SML stream
+uint16_t smlLength = 0;             //detected length of SML stream
 //Classes
 TaskHandle_t Task0;
 hw_timer_t *My_timer = NULL;
 LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 WebServer server(80);
+CRC16 crc(0x1021, 0xFFFF, 0xFFFF, true, true);
 //Multiplus variables
 short   multiplusESSpower = 0;                  //ESS power value currently applied in Multiplus
 float   multiplusTemp = 11.1;
 float   multiplusDcCurrent = -22.2;
 int16_t multiplusAh = -12345;
 byte    multiplusStatus80 = 23;                 //00=ok, 02=battery low
-byte    multiplusVoltageStatus;                 //11=ACin_disconnected, 12=inverter_off, 13=Battery_good_inverter_on, 17=Moment_of_ACin_interruption, 19=Moment_of_ACin_back_on
+byte    multiplusVoltageStatus;                 //11=ACin_disconnected, 12=inverter_off, 13=Battery_good_inverter_on, 16=will not invert, 17=Moment_of_ACin_interruption, 19=Moment_of_ACin_back_on
+                                                //If Multiplus starts with "mains on" blinking, it will not allow inverting, even if it is in Charge+Invert mode. Then multiplusVoltageStatus = 16/17 depending on the mode.
+                                                //If Multiplus starts correctly with "inverter on" and then synchronizing to mains, then multiplusVoltageStatus = 12/13 depending on the mode.
 byte    multiplusEmergencyPowerStatus;          //00=mains, 02=in_emergency_power_mode (=state of ACin relay)
 byte    masterMultiLED_LEDon = 123;             //Bits 0..7 = mains on, absorption, bulk, float, inverter on, overload, low battery, temperature
 byte    masterMultiLED_LEDblink = 234;          //(LEDon=1 && LEDblink=1) = blinking; (LEDon=0 && LEDblink=1) = blinking_inverted 
@@ -146,6 +160,8 @@ float   masterMultiLED_MinimumInputCurrentLimit;
 float   masterMultiLED_MaximumInputCurrentLimit;//for details on MasterMultiLED frame see Victron MK2 protocol PDF
 float   masterMultiLED_ActualInputCurrentLimit;
 byte    masterMultiLED_SwitchRegister;          //See Victron MK2 manual chapter 6.2; bits: 0x01=Charger_on_received, 0x02=Inverter_on_received, 0x10=Charger_finally_on, 0x20=Inverter_finally_on
+//Power meter variables
+byte    pmStatus = 0;
 
 
 
@@ -162,11 +178,11 @@ byte    masterMultiLED_SwitchRegister;          //See Victron MK2 manual chapter
 
 //Symbols used in ISR:
 volatile int cmdAckCnt = 0;                 //counter down-counting the time it takes for Multiplus acknowledging an ESS command
-volatile int debounceCnt = 2*CPS;           //start reacting on button 2 seconds after reboot
-volatile int multiplusSettlingCnt = 0;                    //settling time counter while Multiplus applying new ESS power
+volatile int multiplusSettlingCnt = 0; //settling time counter while Multiplus applying new ESS power; Starting with 0 and immediately setting the right mode makes sense
 volatile int essMinuteCounter = ONE_MINUTE; //Multiplus disables ESS if no value is written within 72 seconds
 volatile int socWatchdog = 20000;           //timer to turn off Multiplus in case there was no SOC received from battery; start with 2 seconds, so that no CAN bus error is displayed on reboot
 volatile int specialModeCnt = SWITCH_MODE_DURATION;   //timer to automatically turn off special mode after XX minutes
+volatile int buttonPressCnt = -1;           //Initialize button-press counter in locked (paused) state
 volatile int cylTime = CPS/10;              //counts down within 1/10 of a second and increases relTime when 0 is reached
 volatile int relTime = 0;                   //relative time, unit = 100ms, on 1000 resets to 0
 //for digital meter pulse measurement:
@@ -188,8 +204,8 @@ volatile boolean isrNewMeterPulse = false;  //indicating that new meter impulse 
 // ===========================================================================
 void IRAM_ATTR onTimer()
 {
+  if ((buttonPressCnt >= 0) && (buttonPressCnt < (30.0*CPS))) buttonPressCnt++;  //nobody will press the button longer than 30 seconds
   if (essMinuteCounter > 0) essMinuteCounter--;
-  if (debounceCnt > 0) debounceCnt--;
   if (multiplusSettlingCnt > 0) multiplusSettlingCnt--;
   if (cmdAckCnt > 0) cmdAckCnt--;
   if (socWatchdog > 0) socWatchdog--;     //watchdog timer ensuring that SOC value is received from battery
@@ -776,6 +792,7 @@ void updateMultiplusPower_usingAbsoluteMeter()
         if ((multiplusESSpower==DISCHARGE_LIMIT) && (essPowerTmp < DISCHARGE_LIMIT-DISCHARGE_LIMIT_STEP)) essPowerTmp = DISCHARGE_LIMIT-DISCHARGE_LIMIT_STEP; //step away from discharge-limit (+)
         if ((multiplusESSpower==-CHARGE_LIMIT) && (essPowerTmp > -CHARGE_LIMIT+CHARGE_LIMIT_STEP)) essPowerTmp = -CHARGE_LIMIT+CHARGE_LIMIT_STEP;             //step away from charge-limit (-)
         applyNewEssPower(essPowerTmp);  //apply essPowerTmp to Multiplus
+        //applyNewEssPower(300);  //DEBUG: dirty hack do to try some different power
       }
       else {
         //If this was the first measurement after settling:
@@ -955,6 +972,54 @@ void onNewMeterValue()
 }
 
 
+void checkSMLpowerMeter()
+{
+  //Check for new bytes on UART
+  while (Serial2.available())
+  {
+    const uint16_t CIR = sizeof(sBuf)-1;  //get the value once
+    char c = Serial2.read();    //read one byte
+    smlp = CIR&(smlp+1);        //increase and wrap pointer to make circular buffer
+    sBuf[smlp] = c;             //write the new byte into circular SML buffer
+    smlCnt += 1;                //increase SML length counter
+    //search the end of the SML stream
+    //-8 -7 -6 -5 -4 -3 -2 -1 -0
+    //00 1B 1B 1B 1B 1A xx xx xx
+    if ((sBuf[CIR&(smlp-8)]==0x00) && (sBuf[CIR&(smlp-7)]==0x1B) && (sBuf[CIR&(smlp-6)]==0x1B) && (sBuf[CIR&(smlp-5)]==0x1B) &&
+        (sBuf[CIR&(smlp-4)]==0x1B) && (sBuf[CIR&(smlp-3)]==0x1A)) {   //if we successfully found the end of SML stream
+      //End of SML stream detected
+      smlLength = smlCnt;                                         //detected length of our SML stream
+      if (smlLength > SML_LENGTH_MAX) smlLength = SML_LENGTH_MAX; //limit to the maximum length we allow
+      smlCnt = 0;                                                 //reset SML length counter, to count next SML stream
+      //Pointer smlp points exactly to the last byte of the stream
+      //Copy smlLength bytes of the message into a new buffer and calculate CRC
+      crc.restart();
+      for (uint16_t i=0; i<(smlLength-2); i++)  //exclude the two CRC bytes at the end
+      {
+        c = sBuf[CIR&(smlp-(smlLength-1)+i)];
+        crc.add(c);
+        sBuf2[i] = c;
+      }
+      //now copy the last two bytes being the CRC
+      sBuf2[smlLength-2] = sBuf[CIR&(smlp-1)];
+      sBuf2[smlLength-1] = sBuf[CIR&(smlp-0)];
+      //verify CRC
+      int16_t smlCRC = 256*sBuf2[smlLength-1] + sBuf2[smlLength-2];    //get CRC from the received stream
+      if (smlCRC == crc.calc()) {     //If CRC is matching
+        if (smlLength == 256) {
+          //decode SML stream, assuming that bytes are always on same position
+          //09 10 11 12   13 14 15
+          //08 00 FF 64 ! 01 02 80   //search meter status
+          if (sBuf2[142]==sBuf2[205]) pmStatus = sBuf2[142];   //if both status values are identical, save status
+        }
+        else {
+          addToLogfile("\nVerified SML with unknown length ("+String(smlLength)+") received");
+        }
+      }
+    }
+  }
+}
+
 void automaticChargerOnlySwitching()
 {
   //First check if we currently supply emergency power, but are not in 'E'-mode yet. If yes, switch to 'E'-Mode.
@@ -996,18 +1061,35 @@ void switchSpecialModes(char desiredMode)
       addToLogfile("\n-> back in default Mode by timeout:");
     }
     //React on button-press
-    boolean bootButton = digitalRead(0);
-    if ((bootButton == 0) && (debounceCnt <= 0))    //if button has been pressed and debouncing period is over
-    {
-      if (switchMode == 'E') switchMode = 'N';        //N = Normal Mode
-      else if (switchMode == 'N') switchMode = 'n';   //n = no-extra-Charge-Mode
-      else if (switchMode == 'n') switchMode = '0';   //0 = 0W Charge+Discharge Mode
-      else if (switchMode == '0') switchMode = 'C';   //5 = 0W Charger-only Mode
-      else if (switchMode == 'C') switchMode = '!';   //! = Low-SOC charge mode
-      else if (switchMode == '!') switchMode = 'E';   //! = Emergency-Power mode
-      debounceCnt = BUTTON_DEBOUNCE_TIME;     //3000 = 300ms
-      specialModeCnt = SWITCH_MODE_DURATION;  //always start timer. If mode automatically ends or not, depends on code above.
-      switchModeChanged = true;               //flag to apply mode below
+    if (buttonPressCnt >= BUTTON_LONGPRESS_TIME) {            //Long push detected
+      //Give pending VE.Bus command time to finish
+      digitalWrite(RED_LED, HIGH);   //turn red LED on, so that also without display we can see to be in "programming mode"
+      lcd.clear();
+      lcd.print("Finish VE.Bus...");
+      delay(2000);
+      //set output GPIOs to defined state
+      digitalWrite(VEBUS_DE, LOW);   //make sure VE.Bus direction is Read
+      lcd.clear();
+      lcd.print("# PROGRAMMING MODE #");
+      //officially deadlock our program
+      while (true) delay(100);
+    }
+    boolean bootButton = digitalRead(BUTTON_GPIO);
+    if (bootButton == HIGH) {                               //If button is released
+      if (buttonPressCnt >= BUTTON_DEBOUNCE_TIME) {         //Short push detected
+        if (switchMode == 'E') switchMode = 'N';        //N = Normal Mode
+        else if (switchMode == 'N') switchMode = 'n';   //n = no-extra-Charge-Mode
+        else if (switchMode == 'n') switchMode = '0';   //0 = 0W Charge+Discharge Mode
+        else if (switchMode == '0') switchMode = 'C';   //5 = 0W Charger-only Mode
+        else if (switchMode == 'C') switchMode = '!';   //! = Low-SOC charge mode
+        else if (switchMode == '!') switchMode = 'E';   //! = Emergency-Power mode
+        specialModeCnt = SWITCH_MODE_DURATION;  //always start timer. If mode automatically ends or not, depends on code above.
+        switchModeChanged = true;               //flag to apply mode below
+      }
+      buttonPressCnt = -1;    //-1 = lock counter. Don't start it yet if button is not pressed.
+    }
+    else {    //Here button is pressed
+      if (buttonPressCnt == -1) buttonPressCnt=0;   //allow to start counter (but don't reset it!)
     }
   }
   else {
@@ -1133,6 +1215,13 @@ void updateDisplays()
     lcd.print("W");
     //print other debug information
     lcd.setCursor(0, 3);
+    if (pmStatus==0x80) {
+      lcd.print("+");
+      lcd.print(meterPower);                          //power direction: consumption
+    }
+    else if (pmStatus==0xA0) lcd.print(-meterPower);  //power direction: grid feed-in
+    else lcd.print("___");                            //power direction unknown
+    lcd.print(" ");
     lcd.print(masterMultiLED_AcInputConfiguration,HEX);
     lcd.print(" ");
     lcd.print(masterMultiLED_Status,HEX);
@@ -1143,6 +1232,8 @@ void updateDisplays()
     lcd.print(" ");
     lcd.print(multiplusEmergencyPowerStatus,HEX);
     lcd.print(" ");
+    lcd.print(smlLength);
+    lcd.print("   ");
     // //Print desired frame
     // lcd.setCursor(0, 3);
     // char temp[4];
@@ -1319,17 +1410,17 @@ void setup() {
   lcd.begin(20, 4);
   //initialize charge/discharge mode options based on default mode
   switchSpecialModes(SWITCH_MODE_DEFAULT);
-  //Setup SerialMonitor for debug information
-  Serial.begin(115200);
-  //Setup Serial port for VE.Bus RS485 to Multiplus
-  Serial1.begin(256000, SERIAL_8N1, VEBUS_RXD1, VEBUS_TXD1);
-  pinMode(VEBUS_DE, OUTPUT);    //RS485 RE/DE direction pin for UART1
-  digitalWrite(VEBUS_DE,LOW);   //set RS485 direction to read
-  //Initialize power meter optical 1/10000kWh impulse input, currently evaluated in ISR
-  pinMode(METER_IMPULSE_INPUT_PIN, INPUT);    //powermeter IR input
-  //Initialize the red LED currently showing the optical impulse from the power meter
-  pinMode(RED_LED, OUTPUT);    //red LED
-  digitalWrite(RED_LED,LOW);   //turn red LED off
+  //Setup serial ports
+  Serial.begin(115200);  //SerialMonitor for debug information
+  Serial1.begin(256000, SERIAL_8N1, VEBUS_RXD1, VEBUS_TXD1);  //VE.Bus RS485 to Multiplus
+  Serial2.begin(9600, SERIAL_8N1, METER_SML_INPUT_PIN, SML_TXD_UNUSED, true);  //SML data from power meter / invert=true
+  //IO pins
+  pinMode(BUTTON_GPIO, INPUT_PULLUP);  //Initialize BOOT button GPIO as input with pull-up resistor
+  pinMode(VEBUS_DE, OUTPUT);           //RS485 RE/DE direction pin for UART1
+  digitalWrite(VEBUS_DE, LOW);         //set RS485 direction to read
+  pinMode(METER_IMPULSE_INPUT_PIN, INPUT);//Power meter optical 1/10000kWh impulse input, currently evaluated in ISR
+  pinMode(RED_LED, OUTPUT);            //Red LED currently showing the optical impulse from the power meter
+  digitalWrite(RED_LED, LOW);          //turn red LED off
   //Init webserver
   WiFi.mode(WIFI_STA);
   WiFi.begin(SSID, PASSWORD);
@@ -1419,6 +1510,7 @@ void loop() {
   automaticChargerOnlySwitching();            //Switch Multiplus into ChargerOnly-Mode if battery is below specific level
   veCmdTimeoutHandling();                     //Multiplus VEbus: Process VEbus information and execute command-sending state machine
   batteryHandling();                          //Battery: Get new battery level (SOC value) from CAN bus, if available
+  checkSMLpowerMeter();
   checkImpulsePowerMeter();                   //Impulse power meter: Check if new 1/10000kWh impulse is available and calculate meter value
   onNewMeterValue();                          //Power meter: If available, add new meter value to logfile and detect power spikes
   if ((soc > SOC_LIMIT_LOWEST) || ((switchMode=='!') && (soc >= (SOC_LIMIT_LOWEST-1)))) {   //This is a 2nd safety check to not undercharge the battery
