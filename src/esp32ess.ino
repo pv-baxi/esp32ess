@@ -136,6 +136,7 @@ const int SML_LENGTH_MAX = 512;     //This is the maximum length we allow for th
 char sBuf2[SML_LENGTH_MAX];         //linear buffer with SML stream
 uint16_t smlCnt = 0;                //counter to count length of SML stream
 uint16_t smlLength = 0;             //detected length of SML stream
+int smlLengthDisplay = 0;           //Show SML length on LCD if > 0 
 //Classes
 TaskHandle_t Task0;
 hw_timer_t *My_timer = NULL;
@@ -162,6 +163,7 @@ float   masterMultiLED_ActualInputCurrentLimit;
 byte    masterMultiLED_SwitchRegister;          //See Victron MK2 manual chapter 6.2; bits: 0x01=Charger_on_received, 0x02=Inverter_on_received, 0x10=Charger_finally_on, 0x20=Inverter_finally_on
 //Power meter variables
 byte    pmStatus = 0;
+char    pmDeviceId[10];                         //Power meter device ID (we assume 10 bytes)
 
 
 
@@ -971,6 +973,31 @@ void onNewMeterValue()
   }
 }
 
+bool searchAndReadSMLentry(char* smlBuffer, char* searchString, int searchStringLen, int searchStart, int searchStop, int skipBytes, int skiprows, char* resultDest, int maxBytesRead)
+{
+  //addFrameToLogfile(searchString, 0, searchStringLen-1);
+  bool success = false;
+  int searchEndIndex = searchStop - searchStringLen;
+  bool found = false;
+  int i = searchStart;
+  while ((i < searchEndIndex+1) && (found == false)) {  //This search loop can probably be improved...
+    found = true;
+    for (int j=0; j<searchStringLen; j++) found = found && (smlBuffer[i+j]==searchString[j]);
+    if (found == false) i++;
+  }
+  //addToLogfile("\n Index: "+String(i));
+  if (i < searchEndIndex+1) {   //if search string was found
+    i += skipBytes;     //skip for example the list definition (0x77), if we included that in the search
+    //skip (skiprows) rows in that list, INCLUDING the row contained in the searchString
+    for (int row=0; row<skiprows; row++) i += (smlBuffer[i] & 0x0F); //low-nibble in first byte of row contains how many bytes to skip
+    //now we point to the desired row
+    int len = (smlBuffer[i++] & 0x0F) - 1;    //get data length of row
+    if (len > maxBytesRead) len = maxBytesRead;
+    for (int j=0; j<len; j++) resultDest[j]=smlBuffer[i++];  //read following len bytes
+    success = true;
+  }
+  return success;
+}
 
 void checkSMLpowerMeter()
 {
@@ -1006,11 +1033,15 @@ void checkSMLpowerMeter()
       //verify CRC
       int16_t smlCRC = 256*sBuf2[smlLength-1] + sBuf2[smlLength-2];    //get CRC from the received stream
       if (smlCRC == crc.calc()) {     //If CRC is matching
+        smlLengthDisplay = 15;  //display SML length 15 times on display, then vanish again
         if (smlLength == 256) {
-          //decode SML stream, assuming that bytes are always on same position
+          //decode SML stream
+          //Device ID
+          char searchString[] = {0x77,0x07,0x01,0x00,0x00,0x00,0x09,0xFF};
+          searchAndReadSMLentry(sBuf2, searchString, sizeof(searchString), 0, smlLength-1, 1, 5, pmDeviceId, 10);
           //09 10 11 12   13 14 15
           //08 00 FF 64 ! 01 02 80   //search meter status
-          if (sBuf2[142]==sBuf2[205]) pmStatus = sBuf2[142];   //if both status values are identical, save status
+          //if (sBuf2[142]==sBuf2[205]) pmStatus = sBuf2[142];   //if both status values are identical, save status
         }
         else {
           addToLogfile("\nVerified SML with unknown length ("+String(smlLength)+") received");
@@ -1167,24 +1198,21 @@ void updateDisplays()
     //Forward power meter pulse to red LED
     digitalWrite(RED_LED, IRpinDisplay);    //Write the remembered state of the IR input pin to red LED
     IRpinDisplay = LOW;               //make that LED will turn off next Displaying-Cycle
-    //Print temperature
+  // --- Line 1 ---
+    //Print current Multiplus ESS power value
     lcd.setCursor(0, 0);
-    lcd.print(multiplusTemp,1);
-    lcd.print(char(0xDF));
-    lcd.print("C  ");
+    lcd.print(multiplusESSpower);
+    lcd.print("W    ");
     //Print DC current
     lcd.setCursor(7, 0);
     lcd.print(multiplusDcCurrent,1);
     lcd.print("A  ");
-    //Print Multiplus status
+    //Print temperature
     lcd.setCursor(14, 0);
-    lcd.print(masterMultiLED_SwitchRegister,HEX);
-    lcd.print("  ");
-    //Print battery charge level (SOC)
-    lcd.setCursor(17, 0);
-    lcd.print("  %");        //only 2 digits as we hope to never reach 100% due to failure
-    lcd.setCursor(17, 0);
-    if ((soc >= 0) && (soc <= 100)) lcd.print(soc); else lcd.print("--");
+    lcd.print(multiplusTemp,1);
+    lcd.print(char(0xDF));
+    lcd.print("C ");
+  // --- Line 2 ---
     //Print failed + total ESS commands + settling
     lcd.setCursor(0, 1);
     lcd.print(veTxCmdFailCnt);
@@ -1201,47 +1229,56 @@ void updateDisplays()
     //Print Special Mode indication (1-byte ASCII)
     lcd.setCursor(19, 1);
     lcd.print(switchMode);      //print switchMode number as ASCII character
+  // --- Line 3 ---
     //Print current meter value
     lcd.setCursor(0, 2);
-    lcd.print("Mtr:      ");
-    lcd.setCursor(4, 2);
     lcd.print(meterPower);
-    lcd.print("W");
-    //Print current Multiplus ESS power value
+    lcd.print("W  ");
+    //Print Multiplus SwitchMode
+    lcd.setCursor(7, 2);
+    lcd.print(masterMultiLED_SwitchRegister,HEX);
+    lcd.print(" ");
+    //Print Multiplus Voltage Status
     lcd.setCursor(10, 2);
-    lcd.print("ESS:      ");
-    lcd.setCursor(14, 2);
-    lcd.print(multiplusESSpower);
-    lcd.print("W");
-    //print other debug information
-    lcd.setCursor(0, 3);
-    if (pmStatus==0x80) {
-      lcd.print("+");
-      lcd.print(meterPower);                          //power direction: consumption
-    }
-    else if (pmStatus==0xA0) lcd.print(-meterPower);  //power direction: grid feed-in
-    else lcd.print("___");                            //power direction unknown
-    lcd.print(" ");
-    lcd.print(masterMultiLED_AcInputConfiguration,HEX);
-    lcd.print(" ");
-    lcd.print(masterMultiLED_Status,HEX);
-    lcd.print(" ");
-    lcd.print(multiplusStatus80,HEX);
-    lcd.print(" ");
     lcd.print(multiplusVoltageStatus,HEX);
     lcd.print(" ");
-    lcd.print(multiplusEmergencyPowerStatus,HEX);
-    lcd.print(" ");
-    lcd.print(smlLength);
-    lcd.print("   ");
-    // //Print desired frame
+    //Print battery charge level (SOC)
+    lcd.setCursor(13, 2);
+    if ((soc >= 0) && (soc <= 100)) lcd.print(soc); else lcd.print("--"); //only 2 digits as we hope to never reach 100% due to failure
+    lcd.print("% ");
+    //Print blinking SML stream length
+    lcd.setCursor(17, 2);
+    if (smlLengthDisplay > 0) {
+      lcd.print(smlLength);
+      smlLengthDisplay -= 1;
+    }
+    else lcd.print("   ");
+  // --- Line 4 ---
+    // //print other debug information
     // lcd.setCursor(0, 3);
-    // char temp[4];
-    // for (int i=0;i<7;i++)
-    // {
-    //   sprintf(temp,"%02X ",printFrame[i]);
-    //   lcd.print(temp);
+    // if (pmStatus==0x80) {
+    //   lcd.print("+");
+    //   lcd.print(meterPower);                          //power direction: consumption
     // }
+    // else if (pmStatus==0xA0) lcd.print(-meterPower);  //power direction: grid feed-in
+    // else lcd.print("___");                            //power direction unknown
+    // lcd.print(" ");
+    // lcd.print(masterMultiLED_AcInputConfiguration,HEX);
+    // lcd.print(" ");
+    // lcd.print(masterMultiLED_Status,HEX);
+    // lcd.print(" ");
+    // lcd.print(multiplusStatus80,HEX);
+    // lcd.print(" ");
+    // lcd.print(multiplusEmergencyPowerStatus,HEX);
+    // lcd.print(" ");
+    //Print first 7 HEX bytes of desired buffer
+    lcd.setCursor(0, 3);
+    char temp[4];
+    for (int i=0;i<7;i++)
+    {
+      sprintf(temp,"%02X ",pmDeviceId[i]);
+      lcd.print(temp);
+    }
 }
 
 
