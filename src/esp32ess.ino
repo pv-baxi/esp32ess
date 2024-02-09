@@ -68,8 +68,8 @@ const int DISCHARGE_LIMIT_STEP = 200;   //step away from discharge-limit (+Watt)
 const int8_t SOC_LIMIT_UPPER = 96;      //turn off extra charging when battery is >= 96%
 const int8_t SOC_LIMIT_LOWER = 6;       //turn off extra discharge at SOC <= 6%, but still allow extra charging (except no-charge-mode)
 const int8_t SOC_LIMIT_LOWEST = 3;      //stop ESS state machine and sending ESS commands if SOC <= 3% and also stop logging soon
-const int8_t SOC_BELOW_CHARGE_ONLY = 30;//switch to charge-only mode below this battery level
-const int8_t SOC_DISCHARGE_ALLOWED = 35;//switch back to charge/discharge mode above this battery level
+const int8_t SOC_BELOW_CHARGE_ONLY = 30;//switch to charge-only mode below this battery level (default=30%)
+const int8_t SOC_DISCHARGE_ALLOWED = 35;//switch back to charge/discharge mode above this battery level (default=35%)
 const int SOC_LIMIT_UPPER_STEP = 100;   //discharge step away from 0W in case battery full (Watt)
 const int SOC_LIMIT_LOWER_STEP = 100;   //charge step away from 0W in case battery empty (Watt)
 const int NO_CHARGE_MODE_STEP = 100;    //discharge step away from 0W if in no-charge-mode (Watt)
@@ -83,6 +83,7 @@ const int SOC_WATCHDOG_CYCLES = 2.5*CPS;//time after which Multiplus is turned o
 const char SWITCH_MODE_DEFAULT = '0';    //Default switch mode to start with. For mode numbers see function switchSpecialModes()
 const int SWITCH_MODE_DURATION = 60*60*CPS; //automatically exit specific the switch modes after 60 minutes
 const float NOM_VOLT = 48.0;            //Battery nominal voltage (for Watt/Wh estimation)
+const int ELECTRIC_METER_TIME_OFFSET = 6*60*60 + 56*60 + 14;  //To get time from meter runtime value; 02/2024:6h56m14s
 
 
 // #############################################################################
@@ -168,6 +169,11 @@ char     electricMeter_Status280[3];                         //Status sent with 
 int32_t  electricMeter_Consumption = 0;                      //kWh value 1.8.0
 int32_t  electricMeter_FeedIn = 0;                           //kWh value 2.8.0
 uint32_t electricMeter_Runtime = 0;                          //meter runtime in seconds
+int      electricMeterStatusDifferent = 0;                   //to find out if there is ever any difference between Status 1.8.0 and 2.8.0
+int      electricMeterSignPositive = 0;                      //how often within the last power measurement interval we got a positive sign from status
+int      electricMeterSignNegative = 0;                      //how often within the last power measurement interval we got a negative sign from status
+int      electricMeterCurrentSign = +1;                      //by default we assume consumption
+
 
 
 
@@ -713,6 +719,9 @@ short limitNewEsspower(short power)
   if (!extraCharge && (power < 0)) power = 0;
   //disallow positive ESS power in case extraDischarge=false
   if (!extraDischarge && (power > 0)) power = 0;
+  //limit to maximum positive and negative power
+  if (power > DISCHARGE_LIMIT) power = DISCHARGE_LIMIT;
+  if (power < -CHARGE_LIMIT) power = -CHARGE_LIMIT;
   return power;
 }
 
@@ -808,6 +817,29 @@ void updateMultiplusPower_usingAbsoluteMeter()
     }
   }
 }
+
+void updateMultiplusPower_usingSignedMeter()
+{
+  if (newMeterValue) {
+    if (multiplusSettlingCnt <= 0) {
+      //Here we had a new meter value and settling is over:
+      if (secondMeasurement) {
+        //If this was the second measurement after settling:
+        secondMeasurement = false;
+        //Calculate new ESS power:
+        essPowerTmp = multiplusESSpower + meterPower;
+        essPowerTmp = limitNewEsspower(essPowerTmp);         //Limit ESS power based on SOC and mode options
+        applyNewEssPower(essPowerTmp);  //apply essPowerTmp to Multiplus
+        //applyNewEssPower(300);  //DEBUG: dirty hack do to try some different power
+      }
+      else {
+        //If this was the first measurement after settling:
+        secondMeasurement = true;    //indicate that now the second measurement begins
+      }
+    }
+  }
+}
+
 
 
 // ===========================================================================
@@ -933,6 +965,15 @@ void checkImpulsePowerMeter()
     {
       meterPowerPrevious = meterPower;       //remember previous value to detect sudden and large changes
       meterPower = 3600000 / totalCycles;   //calculate power in Watt from measured cycles
+      //Evaluate the sign information from Info-DSS SML data
+      if (electricMeterSignPositive > electricMeterSignNegative) electricMeterCurrentSign = +1;
+      else if (electricMeterSignNegative > electricMeterSignPositive) electricMeterCurrentSign = -1;
+      else if ((electricMeterSignNegative == electricMeterSignPositive) && (electricMeterSignPositive > 0)) electricMeterCurrentSign = 0;   //if sign is fluctuating we better assume 0W on average
+      //else we just keep the sign from last time
+      electricMeterSignPositive = 0;  //clear the counters to start counting again in next measurement period
+      electricMeterSignNegative = 0;
+      //include the sign into power value
+      meterPower = electricMeterCurrentSign * meterPower;
       newMeterValue = true;               //indicate that we got a new meter value
     }
   }
@@ -963,10 +1004,11 @@ void onNewMeterValue()
     if (relTime < 10) tSpaces = "  ";
     else if (relTime < 100) tSpaces = " ";
     String mSpaces = " ";                   //determine required spaces to achieve fixed digits for meterPower
-    if (meterPower < 10) mSpaces = "    ";
-    else if (meterPower < 100) mSpaces = "   ";
-    else if (meterPower < 1000) mSpaces = "  ";
-    addToLogfile("\n"+tSpaces+String(relTime)+mSpaces+String(meterPower));
+    if (abs(meterPower) < 10) mSpaces = "    ";
+    else if (abs(meterPower) < 100) mSpaces = "   ";
+    else if (abs(meterPower) < 1000) mSpaces = "  ";
+    if (meterPower >= 0) addToLogfile("\n"+tSpaces+String(relTime)+mSpaces+"+"+String(meterPower));
+    if (meterPower < 0) addToLogfile("\n"+tSpaces+String(relTime)+mSpaces+String(meterPower));
     // If difference to previous meter value is very large, it just might just be a sudden power spike (e.g. from a device turning on).
     // In case we're well in the settling, high power differences are normal and can be ignored. In case settling was already (or nearly)
     // over, settling time is extended again:
@@ -1068,10 +1110,17 @@ void checkSMLpowerMeter()
         if (searchAndReadSMLentry(sBuf2, searchString3, sizeof(searchString3), 0, smlLength-1, 1, 1, temp, 4)) {
           electricMeter_Runtime = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
         }
+        //Get power sign from status words      //0x8x=consumption; 0xAx=feed-in
+        if ((electricMeter_Status180[2] & 0xF0) == 0x80) electricMeterSignPositive++;
+        else if ((electricMeter_Status180[2] & 0xF0) == 0xA0) electricMeterSignNegative++;
+        //Currently, we evaluate both status words and count for both
+        if ((electricMeter_Status280[2] & 0xF0) == 0x80) electricMeterSignPositive++;
+        else if ((electricMeter_Status280[2] & 0xF0) == 0xA0) electricMeterSignNegative++;
         //Compare both status words
         if ((electricMeter_Status180[0]!=electricMeter_Status280[0]) ||
             (electricMeter_Status180[1]!=electricMeter_Status280[1]) ||
             (electricMeter_Status180[2]!=electricMeter_Status280[2])) {
+          electricMeterStatusDifferent++;   //Increase counter
           addToLogfile("\nElectric meter status not matching");
           addFrameToLogfile(electricMeter_Status180,0,2);
           addFrameToLogfile(electricMeter_Status280,0,2);
@@ -1262,7 +1311,12 @@ void updateDisplays()
   // --- Line 3 ---
     //Print current meter value
     lcd.setCursor(0, 2);
-    lcd.print(meterPower);
+    if (meterPower==0) lcd.print(0);
+    else if (meterPower<0) lcd.print(meterPower);
+    else {
+      lcd.print('+');
+      lcd.print(meterPower);
+    }
     lcd.print("W  ");
     //Print Multiplus SwitchMode
     lcd.setCursor(7, 2);
@@ -1284,36 +1338,31 @@ void updateDisplays()
     }
     else lcd.print("   ");
   // --- Line 4 ---
-    // //print other debug information
-    // lcd.setCursor(0, 3);
-    // if (pmStatus==0x80) {
-    //   lcd.print("+");
-    //   lcd.print(meterPower);                          //power direction: consumption
-    // }
-    // else if (pmStatus==0xA0) lcd.print(-meterPower);  //power direction: grid feed-in
-    // else lcd.print("___");                            //power direction unknown
-    // lcd.print(" ");
-    // lcd.print(masterMultiLED_AcInputConfiguration,HEX);
-    // lcd.print(" ");
-    // lcd.print(masterMultiLED_Status,HEX);
-    // lcd.print(" ");
-    // lcd.print(multiplusStatus80,HEX);
-    // lcd.print(" ");
-    // lcd.print(multiplusEmergencyPowerStatus,HEX);
-    // lcd.print(" ");
-    //Print first 7 HEX bytes of desired buffer
+    //print other debug information
     lcd.setCursor(0, 3);
-    char temp[4];
-    for (int i=0;i<7;i++)
-    {
-      sprintf(temp,"%02X ",electricMeter_DeviceID[i]);
-      lcd.print(temp);
-    }
+    lcd.print(masterMultiLED_AcInputConfiguration,HEX);
+    lcd.print(" ");
+    lcd.print(masterMultiLED_Status,HEX);
+    lcd.print(" ");
+    lcd.print(multiplusStatus80,HEX);
+    lcd.print(" ");
+    lcd.print(multiplusEmergencyPowerStatus,HEX);
+    lcd.print(" ");
+    lcd.print(electricMeterStatusDifferent);
+    lcd.print(" ");
+    //Print first 7 HEX bytes of desired buffer
+    // lcd.setCursor(0, 3);
+    // char temp[4];
+    // for (int i=0;i<7;i++)
+    // {
+    //   sprintf(temp,"%02X ",electricMeter_DeviceID[i]);
+    //   lcd.print(temp);
+    // }
 }
 
 String secondsToTimeStr(uint32_t seconds)
 {
-  uint32_t t = seconds + 6*60*60 + 56*60 + 15;
+  uint32_t t = seconds;
   int s = t % 60;       //get the seconds
   t = (t - s)/60;
   int m = t % 60;       //get the minutes
@@ -1324,6 +1373,12 @@ String secondsToTimeStr(uint32_t seconds)
   return time;
 }
 
+String meterDeviceIdToStr(char *deviceID)
+{
+  char str[20];
+  sprintf(str,"%d %c%c%c%02X %08d",deviceID[1],deviceID[2],deviceID[3],deviceID[4],deviceID[5],(deviceID[6]<<24)+(deviceID[7]<<16)+(deviceID[8]<<8)+deviceID[9]);
+  return str;
+}
 
 
 // ===========================================================================
@@ -1397,7 +1452,8 @@ void handleRoot() {
   } else {
     webpage += "Battery:    CAN bus connection failure! Multiplus disabled.<br>";
   }
-  webpage += "PowerMeter: "+String(meterPower)+"W<br>";
+  if (meterPower >= 0) webpage += "PowerMeter: +"+String(meterPower)+"W<br>";
+  else webpage += "PowerMeter: "+String(meterPower)+"W<br>";
   webpage += "ESS power:  "+String(multiplusESSpower)+"W<br>";
   webpage += "<br>";
   webpage += "<table>";
@@ -1425,18 +1481,16 @@ void handleRoot() {
   webpage += "<br>";
   webpage += "<b>Electric meter</b><br>";
   webpage += "<table>";
-  webpage += "<tr><td>ID:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_DeviceID[1],HEX)+" "+
-              electricMeter_DeviceID[2]+electricMeter_DeviceID[3]+electricMeter_DeviceID[4]+
-              String((electricMeter_DeviceID[5]&0xF0)>>4,HEX)+String(electricMeter_DeviceID[5]&0x0F,HEX)+" "+
-              String((electricMeter_DeviceID[6]<<24)+(electricMeter_DeviceID[7]<<16)+(electricMeter_DeviceID[8]<<8)+electricMeter_DeviceID[9])+"</td></tr>";
+  webpage += "<tr><td>ID:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+meterDeviceIdToStr(electricMeter_DeviceID)+"</td></tr>";
   webpage += "<tr><td>Consumption:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Consumption)+" kWh</td></tr>";
   webpage += "<tr><td>Feed-in:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_FeedIn)+" kWh</td></tr>";
   webpage += "<tr><td>Status 1.8.0:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Status180[0],HEX)+" "+String(electricMeter_Status180[1],HEX)+" "+String(electricMeter_Status180[2],HEX)+"</td></tr>";
   webpage += "<tr><td>Status 2.8.0:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Status280[0],HEX)+" "+String(electricMeter_Status280[1],HEX)+" "+String(electricMeter_Status280[2],HEX)+"</td></tr>";
-  webpage += "<tr><td>Runtime:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Runtime)+" seconds</td></tr>";
+  webpage += "<tr><td>Runtime:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Runtime)+" seconds = "+String(electricMeter_Runtime/(60*60*24))+" days</td></tr>";
   webpage += "</table>";
   webpage += "<br>";
-  webpage += "Time from meter runtime: "+secondsToTimeStr(electricMeter_Runtime)+"<br>";
+  webpage += "Time from meter runtime: "+secondsToTimeStr(electricMeter_Runtime+ELECTRIC_METER_TIME_OFFSET)+"<br>";
+  webpage += "Status 1.8.0 and 2.8.0 differences: "+String(electricMeterStatusDifferent)+"<br>";
   webpage += "<br>";
   webpage += "Battery min: "+String(debugmin)+"<br>";
   webpage += "Battery max: "+String(debugmax)+"<br>";
@@ -1445,15 +1499,6 @@ void handleRoot() {
   webpage += String(logfileCounter)+" bytes written since last logfile view";
   webpage += "</font></body></html>";
   server.send(200, "text/html", webpage);
-
-char     electricMeter_DeviceID[10];                         //electric meter device ID (we assume 10 bytes)
-char     electricMeter_Status180[3];                         //Status sent with 1.8.0 (consumption)
-char     electricMeter_Status280[3];                         //Status sent with 2.8.0 (feed-in)
-int32_t  electricMeter_Consumption = 0;                      //kWh value 1.8.0
-int32_t  electricMeter_FeedIn = 0;                           //kWh value 2.8.0
-int32_t  electricMeter_Runtime = 0;                          //meter runtime in seconds
-
-
 }
 
 // ===========================================================================
@@ -1626,7 +1671,10 @@ void loop() {
         applyNewEssPower(essPowerTmp);                //write essPowerTmp into Multiplus
       }
     }
-    else updateMultiplusPower_usingAbsoluteMeter(); //Evaluate absolute meter power, and if applicable, apply new ESS power value
+    else {
+      //updateMultiplusPower_usingAbsoluteMeter(); //Evaluate absolute meter power, and if applicable, apply new ESS power value
+      updateMultiplusPower_usingSignedMeter();
+    }
     avoidMultiplusTimeout();                        //Ensures that at least every minute Multiplus gets an ESS command. Otherwise it will turn off.
   }
   switchSpecialModes(0);                      //handle BOOT button press activities (GPIO0)
