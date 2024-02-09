@@ -91,4 +91,5 @@ This project is licensed under the GNU General Public License v3.0 or later - se
 * [TWAI] (https://github.com/espressif/arduino-esp32/tree/master/libraries/ESP32/examples/TWAI)
 * [Civilduino] (https://github.com/espressif/arduino-esp32/issues/3921)
 * [Hadmut] (https://www.mikrocontroller.net/topic/561834)
+* [SWeigert] (http://www.stefan-weigert.de/php_loader/sml.php)
 
