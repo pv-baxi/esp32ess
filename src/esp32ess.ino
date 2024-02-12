@@ -59,7 +59,7 @@ const int SETTLING_OFFSET = 2.0*CPS;    //settling time required in addition to 
 const int SETTLING_THRS2 = 200;         //in Watt: below this target, additional settling time is given to multiplus
 const int SETTLING_THRS1 = 100;         //in Watt: below this target, even more settling time is given to multiplus
 const int SETTLING_THRS_ADDON = 2.0*CPS;//extra settling time that is given for low targets per threshold
-const int SETTLING_IGNORE_PWR_SPIKE = 0.5*CPS;//discard power measurements during this period in order to ignore possible power spikes
+const int SETTLING_IGNORE_PWR_SPIKE = 1*CPS;//discard power measurements during this period in order to ignore possible power spikes
 const int SETTLING_MODE_CHANGE = 5.0*CPS;//Wait 5 seconds after each Charger+Inverter mode change attempt
 const int CHARGE_LIMIT = 3300;          //Maximum Multiplus sink/charging power (70A * min. battery charging voltage), maximum is 3300W by experiment
 const int CHARGE_LIMIT_STEP = 200;      //step away from charge-limit (-Watt)
@@ -68,22 +68,23 @@ const int DISCHARGE_LIMIT_STEP = 200;   //step away from discharge-limit (+Watt)
 const int8_t SOC_LIMIT_UPPER = 96;      //turn off extra charging when battery is >= 96%
 const int8_t SOC_LIMIT_LOWER = 6;       //turn off extra discharge at SOC <= 6%, but still allow extra charging (except no-charge-mode)
 const int8_t SOC_LIMIT_LOWEST = 3;      //stop ESS state machine and sending ESS commands if SOC <= 3% and also stop logging soon
-const int8_t SOC_BELOW_CHARGE_ONLY = 30;//switch to charge-only mode below this battery level (default=30%)
-const int8_t SOC_DISCHARGE_ALLOWED = 35;//switch back to charge/discharge mode above this battery level (default=35%)
+const int8_t SOC_BELOW_CHARGE_ONLY = 25;//switch to charge-only mode below this battery level (default=25%)
+const int8_t SOC_DISCHARGE_ALLOWED = 30;//switch back to charge/discharge mode above this battery level (default=30%)
 const int SOC_LIMIT_UPPER_STEP = 100;   //discharge step away from 0W in case battery full (Watt)
 const int SOC_LIMIT_LOWER_STEP = 100;   //charge step away from 0W in case battery empty (Watt)
 const int NO_CHARGE_MODE_STEP = 100;    //discharge step away from 0W if in no-charge-mode (Watt)
 const int MAX_METER_DIFFERENCE = 200;   //if difference between current and last measurent > 100W, measure again to ignore short spikes (Watt)
-const int ESS_POWER_OFFSET = 0;         //after each ESS power calculation, add this offset to feed a little bit more into the grid (e.g. +2W)
+const int ESS_POWER_OFFSET = +5;         //after each ESS power calculation, add this offset to feed a little bit more into the grid (e.g. +2W)
 const int ONE_MINUTE = 60*CPS;          //as Multiplus ESS is automatically disabled about 72 sec after last command written, lastest after 60 seconds we must re-send current ESS power
 const int BUTTON_DEBOUNCE_TIME = 0.1*CPS;   //0.1 seconds gives good results
 const int BUTTON_LONGPRESS_TIME = 3.0*CPS;  //3.0 seconds for a longpress
 const int LOGFILE_SIZE = 65510;         //Maximum text buffer that can be sent via HTTP is 65519 byte (2^16 -1 -16)
 const int SOC_WATCHDOG_CYCLES = 2.5*CPS;//time after which Multiplus is turned off in case there was no SOC received from battery (2.5 seconds)
-const char SWITCH_MODE_DEFAULT = '0';    //Default switch mode to start with. For mode numbers see function switchSpecialModes()
+const char SWITCH_MODE_DEFAULT = 'n';    //Default switch mode to start with. For mode numbers see function switchSpecialModes(); Use '0' in winter;
 const int SWITCH_MODE_DURATION = 60*60*CPS; //automatically exit specific the switch modes after 60 minutes
 const float NOM_VOLT = 48.0;            //Battery nominal voltage (for Watt/Wh estimation)
 const int ELECTRIC_METER_TIME_OFFSET = 6*60*60 + 56*60 + 14;  //To get time from meter runtime value; 02/2024:6h56m14s
+
 
 
 // #############################################################################
@@ -116,6 +117,7 @@ int meterPowerPrevious = 0;         //result of previous power measurement for s
 int meterPowerOld = 0;              //for comparison in usingAbsoluteMeter() calculation if we got better or worse
 boolean secondMeasurement = false;  //flag after settling time is over, we've been waiting for a second measurement to complete
 float essR = 1.00;                  //Multiplus should not apply more power than meter shows, to keep regulation stable. In my case, Multiplus power is about 3.7% to 7.5% less than meter power. So setting to 1.00 is fine.
+                                    //newMultiplusESSpower = essR * meterPower;
 byte veCmdSendState = 0;            //2 ready to send; 0x1X has been send but no ACK yet; 0 acknowledged=done; 7 set Charger+Discharger mode; 5 set Charge-Only mode
 int veTxCmdFailCnt = 0;             //Counts the number of commands that were not acknowledged by Multiplus and had to be resent.
 int veRxCmdFailCnt = 0;             //amount of received VE.Bus commands with wrong checksum
@@ -145,7 +147,7 @@ LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 WebServer server(80);
 CRC16 crc(0x1021, 0xFFFF, 0xFFFF, true, true);
 //Multiplus variables
-short   multiplusESSpower = 0;                  //ESS power value currently applied in Multiplus
+short   multiplusESSpower = -1;                  //ESS power value currently applied in Multiplus, init with -1, so that it will be very likely updated on start
 float   multiplusTemp = 11.1;
 float   multiplusDcCurrent = -22.2;
 int16_t multiplusAh = -12345;
@@ -166,15 +168,37 @@ byte    masterMultiLED_SwitchRegister;          //See Victron MK2 manual chapter
 char     electricMeter_DeviceID[10];                         //electric meter device ID (we assume 10 bytes)
 char     electricMeter_Status180[3];                         //Status sent with 1.8.0 (consumption)
 char     electricMeter_Status280[3];                         //Status sent with 2.8.0 (feed-in)
-int32_t  electricMeter_Consumption = 0;                      //kWh value 1.8.0
-int32_t  electricMeter_FeedIn = 0;                           //kWh value 2.8.0
+double   electricMeter_Consumption = 0;                      //kWh value 1.8.0
+double   electricMeter_FeedIn = 0;                           //kWh value 2.8.0
 uint32_t electricMeter_Runtime = 0;                          //meter runtime in seconds
+float    electricMeter_Power = 0;
+float    electricMeter_PowerL1 = 0;
+float    electricMeter_PowerL2 = 0;
+float    electricMeter_PowerL3 = 0;
 int      electricMeterStatusDifferent = 0;                   //to find out if there is ever any difference between Status 1.8.0 and 2.8.0
+int      electricMeterCRCwrong = 0;                          //count every SML stream that was discarded due to wrong CRC
 int      electricMeterSignPositive = 0;                      //how often within the last power measurement interval we got a positive sign from status
 int      electricMeterSignNegative = 0;                      //how often within the last power measurement interval we got a negative sign from status
 int      electricMeterCurrentSign = +1;                      //by default we assume consumption
+short estTargetPower = 0;
+int powerUpdateStrategy = 6;                                 //10=maximum, 8=immediate, 6=minimum, 4=0W, 2=ChargeOnly
+const int SIZE_PWR_RINGBUF = 30;                             //30 seconds
+short estTargetPowerRingBuf[SIZE_PWR_RINGBUF] = {0};         //ringbuffer of estTargetPower of the last SIZE_PWR_RINGBUF seconds
+int ptrPowerRingBuf = 0;                                      //start with 1st element in ringBuffer
 
+// Meine Ladeschwellen:
+// < ChargeOnly
+// >= 30% 0W mode
+// >= 50% Minimum mode
+// >= 75% Immediate mode (effectively disabled)
+// >= 75% Maximum mode
 
+// Meine Entladeschwellen:
+// >= 70% Maximum mode
+// >= 70% Immediate mode (effectively disabled)
+// >= 45% Minimum mode
+// >= 25% 0W mode
+// <  ChargeOnly
 
 
 
@@ -198,6 +222,8 @@ volatile int specialModeCnt = SWITCH_MODE_DURATION;   //timer to automatically t
 volatile int buttonPressCnt = -1;           //Initialize button-press counter in locked (paused) state
 volatile int cylTime = CPS/10;              //counts down within 1/10 of a second and increases relTime when 0 is reached
 volatile int relTime = 0;                   //relative time, unit = 100ms, on 1000 resets to 0
+volatile int oneSecondTimer = 0;            //used to generate flag oneSecondOver every second
+volatile bool oneSecondOver = false;        //set to true every second
 //for digital meter pulse measurement:
 volatile boolean IRpinDisplay = LOW;        //remember state of IR input pin to let LED blink once in main loop
 volatile int highCnt = 1000;                //how long the high-pulse took. Normal is 20 = 2ms. Initialize with higher value, meaning no valid measurement
@@ -229,6 +255,11 @@ void IRAM_ATTR onTimer()
     cylTime = (CPS/10);  //  reset to 1/10 of a second
     relTime++;           //  this is a 1/10 second counter
     if (relTime >= 1000) relTime = 0;   //overflow at 1000 units = 100 seconds
+  }
+  oneSecondTimer++;
+  if (oneSecondTimer == CPS) {
+    oneSecondOver = true;
+    oneSecondTimer = 0;
   }
   //============================================================================================================
   //The following code is for reading the optical 1/10000kWh impulses from the power meter.
@@ -718,7 +749,7 @@ short limitNewEsspower(short power)
   //disallow negative ESS power in case extraCharge=false
   if (!extraCharge && (power < 0)) power = 0;
   //disallow positive ESS power in case extraDischarge=false
-  if (!extraDischarge && (power > 0)) power = 0;
+  if (((!extraDischarge) || (multiplusVoltageStatus!=0x13)) && (power > 0)) power = 0;
   //limit to maximum positive and negative power
   if (power > DISCHARGE_LIMIT) power = DISCHARGE_LIMIT;
   if (power < -CHARGE_LIMIT) power = -CHARGE_LIMIT;
@@ -824,13 +855,38 @@ void updateMultiplusPower_usingSignedMeter()
     if (multiplusSettlingCnt <= 0) {
       //Here we had a new meter value and settling is over:
       if (secondMeasurement) {
-        //If this was the second measurement after settling:
+        //If this was the second measurement after settling, meaning a valid measurement
         secondMeasurement = false;
-        //Calculate new ESS power:
-        essPowerTmp = multiplusESSpower + meterPower;
-        essPowerTmp = limitNewEsspower(essPowerTmp);         //Limit ESS power based on SOC and mode options
-        applyNewEssPower(essPowerTmp);  //apply essPowerTmp to Multiplus
-        //applyNewEssPower(300);  //DEBUG: dirty hack do to try some different power
+        //Estimate total power to compensate
+        //Examples to understand behaviour:
+        //Meter=+300W(consume), Multiplus=+300W(invert) -> Total = 600W
+        //Meter=-300W(feed-in), Multiplus=-300W(charge) -> Total = -600W
+        //Meter=-300W,          Multiplus=+300W         -> Total = 0W
+        //Meter=+300W,          Multiplus=-300W         -> Total = 0W
+        estTargetPower = multiplusESSpower + round(abs(essR) * meterPower) + ESS_POWER_OFFSET;
+        essPowerTmp = multiplusESSpower;      //take current Multiplus ESS power as starting point
+        //Unfortuantely as Multiplus cannot change power rapidly and meter also takes some time, with a pulsed sink we'll always be some
+        //seconds behind. Result is, that we waste battery power to feed into the grid while sink is already off. And also we still
+        //consume from the grid quickly after the sink turns on until the Multiplus has raised.
+        //That's why trying to compensate everything immediately doesn't neccessarily make sense. But we have two alterntive strategies:
+        //1) Overcompensate (Maximum strategy):
+        //   We make sure that we always provide the maximum power required and only reduce Multiplus power slowly.
+        //   Makes sense in summer, when we've basically unlimited power and feed-in anyway.
+        //2) Undercompensate (Minimum strategy):
+        //   We only provide the mimimum power that is required without interruption. But we skip providing additional
+        //   power in the spikes and only increase Multiplus power slowly.
+        //   Makes sense in winter, when power is rare and we probably have to consume anyway.
+        //Now update depending on strategy
+        if (powerUpdateStrategy == 10) {          //Maximum strategy
+          if (estTargetPower > essPowerTmp) essPowerTmp = estTargetPower;   //in case latest value is highest, raise immediately
+        }
+        else if (powerUpdateStrategy == 8) {      //Immediate strategy
+          essPowerTmp = estTargetPower;           //immediately apply target Power
+        }
+        else if (powerUpdateStrategy == 6) {      //Minimum strategy
+          if (estTargetPower < essPowerTmp) essPowerTmp = estTargetPower;   //in case latest value is lowest, fall immediately
+        }
+        else essPowerTmp = 0;                     //0W strategy (compensate ACout2 only)
       }
       else {
         //If this was the first measurement after settling:
@@ -838,6 +894,30 @@ void updateMultiplusPower_usingSignedMeter()
       }
     }
   }
+  if (oneSecondOver) {    //Independently of a meter value do every second (triggered by ISR)
+    oneSecondOver = false;
+    //put current estTargetPower into a ringbuffer
+    ptrPowerRingBuf++;
+    if (ptrPowerRingBuf > (SIZE_PWR_RINGBUF-1)) ptrPowerRingBuf = 0;  //wrap pointer if needed
+    estTargetPowerRingBuf[ptrPowerRingBuf] = estTargetPower;
+    //Now evaluate all values in the ringbuffer based on the update strategy
+    //Find max and min value of current ringbuffer
+    short min = +30000;
+    short max = -30000;
+    //addToLogfile("\n");   //DEBUG print current Ringbuffer into Logfile
+    for (int i=0; i<SIZE_PWR_RINGBUF; i++) {
+      short pwr = estTargetPowerRingBuf[i];
+      if (pwr < min) min = pwr;
+      if (pwr > max) max = pwr;
+      //addToLogfile(" "+String(pwr));   //DEBUG print current Ringbuffer into Logfile
+    }
+    if (powerUpdateStrategy == 10) essPowerTmp = max;          //Maximum strategy
+    if (powerUpdateStrategy == 6) essPowerTmp = min;          //Minimum strategy
+  }
+  //Apply limits to essPowerTmp
+  essPowerTmp = limitNewEsspower(essPowerTmp);                            //Limit ESS power based on SOC and mode options
+  //In case the remaining ESS power has been changed, and settling is over, apply latest ESS power to Multiplus
+  if ((essPowerTmp != multiplusESSpower) && (multiplusSettlingCnt <= 0)) applyNewEssPower(essPowerTmp);    //apply essPowerTmp to Multiplus
 }
 
 
@@ -1020,10 +1100,9 @@ void onNewMeterValue()
   }
 }
 
-bool searchAndReadSMLentry(char* smlBuffer, char* searchString, int searchStringLen, int searchStart, int searchStop, int skipBytes, int skiprows, char* resultDest, int maxBytesRead)
+
+int searchSMLentry(char* smlBuffer, char* searchString, int searchStringLen, int searchStart, int searchStop)
 {
-  //addFrameToLogfile(searchString, 0, searchStringLen-1);
-  bool success = false;
   int searchEndIndex = searchStop - searchStringLen;
   bool found = false;
   int i = searchStart;
@@ -1032,25 +1111,34 @@ bool searchAndReadSMLentry(char* smlBuffer, char* searchString, int searchString
     for (int j=0; j<searchStringLen; j++) found = found && (smlBuffer[i+j]==searchString[j]);
     if (found == false) i++;
   }
-  //addToLogfile("\n Index: "+String(i));
   if (i < searchEndIndex+1) {   //if search string was found
-    i += skipBytes;     //skip for example the list definition (0x77), if we included that in the search
-    //skip (skiprows) rows in that list, INCLUDING the row contained in the searchString
-    for (int row=0; row<skiprows; row++) i += (smlBuffer[i] & 0x0F); //low-nibble in first byte of row contains how many bytes to skip
-    //now we point to the desired row
-
-    int len = (smlBuffer[i++] & 0x0F) - 1;    //get data length of row
-    if (len > maxBytesRead) len = maxBytesRead;
-    if (i+len-1 <= searchEndIndex) {  //check that we are not accessing bytes outside the SML message...
-      for (int j=0; j<len; j++) resultDest[j]=smlBuffer[i++];  //read following len bytes
-      success = true;
-    }
+    return i;
   }
-  return success;
+  else return -1;
 }
+
+int readSMLentry(char* smlBuffer, int smlLength, int pos, int skipBytes, int skiprows, char* resultDest, int maxBytesRead)
+{
+  int len = 0;
+  if (pos < smlLength) {   //if start position is inside SML stream
+    pos += skipBytes;     //skip for example the list definition (0x77), if we included that in the search
+    //skip (skiprows) rows in that list, INCLUDING the row contained in the searchString
+    for (int row=0; row<skiprows; row++) pos += (smlBuffer[pos] & 0x0F); //low-nibble in first byte of row contains how many bytes to skip
+    //now we point to the desired row
+    len = (smlBuffer[pos++] & 0x0F) - 1;    //get data length of row
+    if (len > maxBytesRead) len = maxBytesRead;
+    if (pos+len <= smlLength) {  //check that we are not accessing bytes outside the SML message...
+      for (int j=0; j<len; j++) resultDest[j]=smlBuffer[pos++];  //read following len bytes
+    }
+    else len = 0;
+  }
+  return len;
+}
+
 
 void checkSMLpowerMeter()
 {
+  newMeterValue = false; //Here the meter value is not new anymore
   //Check for new bytes on UART
   while (Serial2.available())
   {
@@ -1082,35 +1170,129 @@ void checkSMLpowerMeter()
       sBuf2[smlLength-1] = sBuf[CIR&(smlp-0)];
       //verify CRC
       int16_t smlCRC = (sBuf2[smlLength-1]<<8) + sBuf2[smlLength-2];    //get CRC from the received stream
-      if (smlCRC == crc.calc()) {     //If CRC is matching
+      int16_t calculatedCRC = crc.calc();
+      if (smlCRC == calculatedCRC) {     //If CRC is matching
         smlLengthDisplay = 15;  //display SML length 15 times on display, then vanish again
         //decode SML stream
+        //addFrameToLogfile(sBuf2,0,smlLength-1); //DEBUG
+        char temp[8];       //8 bytes to fit Wh counters with full precision
+        int8_t scaler = 0;  //required for correct power/counters readout
+        int pos = -1;       //position where we found the search string inside the SML stream
         //Device ID
         char searchString0[] = {0x77,0x07,0x01,0x00,0x00,0x00,0x09,0xFF};
-        searchAndReadSMLentry(sBuf2, searchString0, sizeof(searchString0), 0, smlLength-1, 1, 5, electricMeter_DeviceID, 10);
-        //Status 1.8.0
+        pos = searchSMLentry(sBuf2, searchString0, sizeof(searchString0), 0, smlLength-1);
+        if (pos >= 0) readSMLentry(sBuf2, smlLength, pos, 1, 5, electricMeter_DeviceID, 10);
+        //1.8.0 (consumption) status + kWh counter
         char searchString1[] = {0x77,0x07,0x01,0x00,0x01,0x08,0x00,0xFF};
-        searchAndReadSMLentry(sBuf2, searchString1, sizeof(searchString1), 0, smlLength-1, 1, 1, electricMeter_Status180, 3);
-        //Consumption 1.8.0 (same searchString as Status 1.8.0)
-        char temp[4];
-        if (searchAndReadSMLentry(sBuf2, searchString1, sizeof(searchString1), 0, smlLength-1, 1, 5, temp, 4)) {
-          electricMeter_Consumption = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
+        pos = searchSMLentry(sBuf2, searchString1, sizeof(searchString1), 0, smlLength-1);
+        if (pos >= 0) {
+          readSMLentry(sBuf2, smlLength, pos, 1, 1, electricMeter_Status180, 3);
+          if (readSMLentry(sBuf2, smlLength, pos, 1, 4, temp, 1) == 1) {          //Scaling factor 1.8.0
+            scaler = temp[0];
+            int len = readSMLentry(sBuf2, smlLength, pos, 1, 5, temp, 8);            //Consumption 1.8.0
+            if (len > 0) {
+              uint64_t p64 = 0;
+              uint64_t d64 = 0;
+              int bitshift = 0;
+              for (int i = len-1; i>=0 ; i--) {
+                d64 = temp[i];
+                d64 = d64 << bitshift;
+                p64 += d64;
+                bitshift += 8;
+              }
+              electricMeter_Consumption = p64 * pow(10,scaler) * 0.001;   // *0.001 as we want kWh, not Wh
+            }
+          }
         }
-        //Status 2.8.0
+        //2.8.0 (feed-in) status + kWh counter
         char searchString2[] = {0x77,0x07,0x01,0x00,0x02,0x08,0x00,0xFF};
-        searchAndReadSMLentry(sBuf2, searchString2, sizeof(searchString2), 0, smlLength-1, 1, 1, electricMeter_Status280, 3);
-        //Feed-in 2.8.0 (same searchString as Status 2.8.0)
-        temp[4];
-        if (searchAndReadSMLentry(sBuf2, searchString2, sizeof(searchString2), 0, smlLength-1, 1, 5, temp, 4)) {
-          electricMeter_FeedIn = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
+        pos = searchSMLentry(sBuf2, searchString2, sizeof(searchString2), 0, smlLength-1);
+        if (pos >= 0) {
+          readSMLentry(sBuf2, smlLength, pos, 1, 1, electricMeter_Status280, 3);
+          if (readSMLentry(sBuf2, smlLength, pos, 1, 4, temp, 1) == 1) {          //Scaling factor 2.8.0
+            scaler = temp[0];
+            int len = readSMLentry(sBuf2, smlLength, pos, 1, 5, temp, 8);            //Consumption 2.8.0
+            if (len > 0) {
+              uint64_t p64 = 0;
+              uint64_t d64 = 0;
+              int bitshift = 0;
+              for (int i = len-1; i>=0 ; i--) {
+                d64 = temp[i];
+                d64 = d64 << bitshift;
+                p64 += d64;
+                bitshift += 8;
+              }
+              electricMeter_FeedIn = p64 * pow(10,scaler) * 0.001;   // *0.001 as we want kWh, not Wh
+            }
+          }
         }
         //Runtime
         char searchString3[] = {0x72,0x62,0x01,0x65};
-        temp[4];
-        if (searchAndReadSMLentry(sBuf2, searchString3, sizeof(searchString3), 0, smlLength-1, 1, 1, temp, 4)) {
-          electricMeter_Runtime = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
+        pos = searchSMLentry(sBuf2, searchString3, sizeof(searchString3), 0, smlLength-1);
+        if (pos >= 0) {
+          int len = readSMLentry(sBuf2, smlLength, pos, 1, 1, temp, 4);
+          if (len == 4) electricMeter_Runtime = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
         }
-        //Get power sign from status words      //0x8x=consumption; 0xAx=feed-in
+        //Continue with values only available in "complete" SML info
+        //Summed power
+        char searchString4[] = {0x77,0x07,0x01,0x00,0x10,0x07,0x00,0xFF};
+        pos = searchSMLentry(sBuf2, searchString4, sizeof(searchString4), 0, smlLength-1);
+        if (pos >= 0) {
+          if (readSMLentry(sBuf2, smlLength, pos, 1, 4, temp, 1) == 1) {          //Scaling factor summed power
+            scaler = temp[0];
+            int len = readSMLentry(sBuf2, smlLength, pos, 1, 5, temp, 4);         //Summed power ín W
+            if (len == 4) {
+              int32_t p32 = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
+              electricMeter_Power = p32 * pow(10,scaler);
+              //if ((electricMeter_Status180[2] & 0xF0) == 0xA0) electricMeter_Power = -electricMeter_Power;  //not needed as my meter already gives a signed value
+              //also update the integer values
+              meterPowerPrevious = meterPower;
+              meterPower = round(electricMeter_Power);
+              newMeterValue = true;
+            }
+          }
+        }
+        //Power L1
+        char searchString5[] = {0x77,0x07,0x01,0x00,0x24,0x07,0x00,0xFF};
+        pos = searchSMLentry(sBuf2, searchString5, sizeof(searchString5), 0, smlLength-1);
+        if (pos >= 0) {
+          if (readSMLentry(sBuf2, smlLength, pos, 1, 4, temp, 1) == 1) {          //Scaling factor power L1
+            scaler = temp[0];
+            int len = readSMLentry(sBuf2, smlLength, pos, 1, 5, temp, 4);         //power L1 ín W
+            if (len == 4) {
+              int32_t p32 = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
+              electricMeter_PowerL1 = p32 * pow(10,scaler);
+            }
+          }
+        }
+        //Power L2
+        char searchString6[] = {0x77,0x07,0x01,0x00,0x38,0x07,0x00,0xFF};
+        pos = searchSMLentry(sBuf2, searchString6, sizeof(searchString6), 0, smlLength-1);
+        if (pos >= 0) {
+          if (readSMLentry(sBuf2, smlLength, pos, 1, 4, temp, 1) == 1) {          //Scaling factor power L2
+            scaler = temp[0];
+            int len = readSMLentry(sBuf2, smlLength, pos, 1, 5, temp, 4);         //power L2 ín W
+            if (len == 4) {
+              int32_t p32 = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
+              electricMeter_PowerL2 = p32 * pow(10,scaler);
+            }
+          }
+        }
+        //Power L3
+        char searchString7[] = {0x77,0x07,0x01,0x00,0x4C,0x07,0x00,0xFF};
+        pos = searchSMLentry(sBuf2, searchString7, sizeof(searchString7), 0, smlLength-1);
+        if (pos >= 0) {
+          if (readSMLentry(sBuf2, smlLength, pos, 1, 4, temp, 1) == 1) {          //Scaling factor power L3
+            scaler = temp[0];
+            int len = readSMLentry(sBuf2, smlLength, pos, 1, 5, temp, 4);         //power L3 ín W
+            if (len == 4) {
+              int32_t p32 = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
+              electricMeter_PowerL3 = p32 * pow(10,scaler);
+            }
+          }
+        }
+        //Count power signs from status words for combination with impulse power measurement
+        //0x8x=consumption; 0xAx=feed-in
         if ((electricMeter_Status180[2] & 0xF0) == 0x80) electricMeterSignPositive++;
         else if ((electricMeter_Status180[2] & 0xF0) == 0xA0) electricMeterSignNegative++;
         //Currently, we evaluate both status words and count for both
@@ -1125,6 +1307,11 @@ void checkSMLpowerMeter()
           addFrameToLogfile(electricMeter_Status180,0,2);
           addFrameToLogfile(electricMeter_Status280,0,2);
         }
+      }
+      else {  //If CRC was wrong:
+        electricMeterCRCwrong++;
+        //addToLogfile("\n"+String(smlLength)+" "+String(calculatedCRC,HEX));
+        //addFrameToLogfile(sBuf2,0,smlLength-1);
       }
     }
   }
@@ -1486,11 +1673,16 @@ void handleRoot() {
   webpage += "<tr><td>Feed-in:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_FeedIn)+" kWh</td></tr>";
   webpage += "<tr><td>Status 1.8.0:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Status180[0],HEX)+" "+String(electricMeter_Status180[1],HEX)+" "+String(electricMeter_Status180[2],HEX)+"</td></tr>";
   webpage += "<tr><td>Status 2.8.0:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Status280[0],HEX)+" "+String(electricMeter_Status280[1],HEX)+" "+String(electricMeter_Status280[2],HEX)+"</td></tr>";
-  webpage += "<tr><td>Runtime:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Runtime)+" seconds = "+String(electricMeter_Runtime/(60*60*24))+" days</td></tr>";
+  webpage += "<tr><td>Runtime:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Runtime)+" sec = "+String(electricMeter_Runtime/(60*60*24))+" days</td></tr>";
+  webpage += "<tr><td>Power L1:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_PowerL1)+"W</td></tr>";
+  webpage += "<tr><td>Power L2:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_PowerL2)+"W</td></tr>";
+  webpage += "<tr><td>Power L3:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_PowerL3)+"W</td></tr>";
+  webpage += "<tr><td>Power (balanced):</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Power)+"W</td></tr>";
   webpage += "</table>";
   webpage += "<br>";
   webpage += "Time from meter runtime: "+secondsToTimeStr(electricMeter_Runtime+ELECTRIC_METER_TIME_OFFSET)+"<br>";
   webpage += "Status 1.8.0 and 2.8.0 differences: "+String(electricMeterStatusDifferent)+"<br>";
+  webpage += "Wrong CRC in Info-DSS messages: "+String(electricMeterCRCwrong)+"<br>";
   webpage += "<br>";
   webpage += "Battery min: "+String(debugmin)+"<br>";
   webpage += "Battery max: "+String(debugmax)+"<br>";
@@ -1563,7 +1755,7 @@ void setup() {
   //Setup serial ports
   Serial.begin(115200);  //SerialMonitor for debug information
   Serial1.begin(256000, SERIAL_8N1, VEBUS_RXD1, VEBUS_TXD1);  //VE.Bus RS485 to Multiplus
-  Serial2.begin(9600, SERIAL_8N1, METER_SML_INPUT_PIN, SML_TXD_UNUSED, true);  //SML data from power meter / invert=true
+  Serial2.begin(9600, SERIAL_8N1, METER_SML_INPUT_PIN, SML_TXD_UNUSED); //, true);  //SML data from power meter //invert=false/true
   //IO pins
   pinMode(BUTTON_GPIO, INPUT_PULLUP);  //Initialize BOOT button GPIO as input with pull-up resistor
   pinMode(VEBUS_DE, OUTPUT);           //RS485 RE/DE direction pin for UART1
@@ -1661,7 +1853,7 @@ void loop() {
   veCmdTimeoutHandling();                     //Multiplus VEbus: Process VEbus information and execute command-sending state machine
   batteryHandling();                          //Battery: Get new battery level (SOC value) from CAN bus, if available
   checkSMLpowerMeter();
-  checkImpulsePowerMeter();                   //Impulse power meter: Check if new 1/10000kWh impulse is available and calculate meter value
+  //checkImpulsePowerMeter();                   //Impulse power meter: Check if new 1/10000kWh impulse is available and calculate meter value
   onNewMeterValue();                          //Power meter: If available, add new meter value to logfile and detect power spikes
   if ((soc > SOC_LIMIT_LOWEST) || ((switchMode=='!') && (soc >= (SOC_LIMIT_LOWEST-1)))) {   //This is a 2nd safety check to not undercharge the battery
     //If battery is above minimum charge level, or battery is lower but we are in switchMode "!"
