@@ -1318,7 +1318,10 @@ void checkSMLpowerMeter()
         pos = searchSMLentry(sBuf2, searchString3, sizeof(searchString3), 0, smlLength-1);
         if (pos >= 0) {
           int len = readSMLentry(sBuf2, smlLength, pos, 1, 1, temp, 4);
-          if (len == 4) electricMeter_Runtime = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
+          if (len == 4) {
+            electricMeter_Runtime = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
+            timeIsValid = true;   //indicate that we got a valid time from power meter and time-specific operations can start
+          }
         }
         //Continue with values only available in "complete" SML info
         //Summed power
@@ -1743,7 +1746,8 @@ void handleRoot() {
   } else {
     webpage += "Battery:    CAN bus connection failure! Multiplus disabled.<br>";
   }
-  webpage += "Time: "+secondsToTimeStr(electricMeter_Runtime+ELECTRIC_METER_TIME_OFFSET,true)+"<br>";
+  webpage += "Time: ";
+  if (timeIsValid) webpage += secondsToTimeStr(electricMeter_Runtime+ELECTRIC_METER_TIME_OFFSET,true)+"<br>"; else webpage += "- still unknown -<br>";
   if (meterPower >= 0) webpage += "PowerMeter: +"+String(meterPower)+"W<br>";
   else webpage += "PowerMeter: "+String(meterPower)+"W<br>";
   webpage += "ESS power:  "+String(multiplusESSpower)+"W ("+String(powerACin)+"W)<br>";
@@ -1804,18 +1808,25 @@ void handleRoot() {
   webpage += "<tr><td>CRC failures:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeterCRCwrong)+"</td></tr>";
   webpage += "</table>";
   webpage += "<br>";
-  webpage += "Battery min: "+String(debugmin)+"%<br>";
-  webpage += "Battery max: "+String(debugmax)+"%<br>";
-  webpage += "ACin Umin: "+String(acVoltageMin, 2)+"V ("+secondsToTimeStr(timeAcVoltageMin+ELECTRIC_METER_TIME_OFFSET,true)+")<br>";
-  webpage += "ACin Umax: "+String(acVoltageMax, 2)+"V ("+secondsToTimeStr(timeAcVoltageMax+ELECTRIC_METER_TIME_OFFSET,true)+")<br>";
-  webpage += "AC frequency min: "+String(acFrequencyMin, 3)+"Hz ("+secondsToTimeStr(timeAcFrequencyMin+ELECTRIC_METER_TIME_OFFSET,true)+")<br>";
-  webpage += "AC frequency max: "+String(acFrequencyMax, 3)+"Hz ("+secondsToTimeStr(timeAcFrequencyMax+ELECTRIC_METER_TIME_OFFSET,true)+")<br>";
-  webpage += "DC Umin: "+String(dcVoltageMin, 2)+"V<br>";
-  webpage += "DC Umax: "+String(dcVoltageMax, 2)+"V<br>";
-  webpage += "DC discharge current max: "+String(dcCurrentMin,1)+"A ("+String(int(round(dcCurrentMin*NOM_VOLT)))+"W)<br>";
-  webpage += "DC charge current max: "+String(dcCurrentMax,1)+"A ("+String(int(round(dcCurrentMax*NOM_VOLT)))+"W)<br>";
-  webpage += "Multiplus temp. min: "+String(multiplusTempMin,1)+"&deg;C<br>";
-  webpage += "Multiplus temp. max: "+String(multiplusTempMax,1)+"&deg;C<br>";
+  webpage += "<b>BMS</b><br>";
+  webpage += "<table>";
+  webpage += "<tr><td>State of charge:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.soc)+"%</td></tr>";
+  webpage += "<tr><td>State of health:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.soh)+"%</td></tr>";
+  webpage += "<tr><td>Charge voltage max:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.chargeVoltage,1)+"V</td></tr>";
+  webpage += "<tr><td>Charge current limit:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.chargeCurrentLimit,1)+"A</td></tr>";
+  webpage += "<tr><td>Discharge current limit:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.dischargeCurrentLimit,1)+"A</td></tr>";
+  webpage += "<tr><td>Discharge voltage min:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.dischargeVoltage,1)+"V</td></tr>";
+  webpage += "<tr><td>Voltage:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.voltage,2)+"V</td></tr>";
+  webpage += "<tr><td>Current:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.current,1)+"A</td></tr>";
+  webpage += "<tr><td>Temperature:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.temperature,1)+"&deg;C</td></tr>";
+  webpage += "<tr><td>Manufacturer:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.manufacturer)+"</td></tr>";
+  webpage += "<tr><td>Nr of packs in parallel:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.nrPacksInParallel)+"</td></tr>";
+  webpage += "<tr><td>Protection flags 1:</td><td>&nbsp;&nbsp;&nbsp;</td><td>0x"+String(battery.protectionFlags1,HEX)+"</td></tr>";
+  webpage += "<tr><td>Protection flags 2:</td><td>&nbsp;&nbsp;&nbsp;</td><td>0x"+String(battery.protectionFlags2,HEX)+"</td></tr>";
+  webpage += "<tr><td>Warning flags 1:</td><td>&nbsp;&nbsp;&nbsp;</td><td>0x"+String(battery.warningFlags1,HEX)+"</td></tr>";
+  webpage += "<tr><td>Warning flags 2:</td><td>&nbsp;&nbsp;&nbsp;</td><td>0x"+String(battery.warningFlags2,HEX)+"</td></tr>";
+  webpage += "<tr><td>Request flags:</td><td>&nbsp;&nbsp;&nbsp;</td><td>0x"+String(battery.requestFlags,HEX)+"</td></tr>";
+  webpage += "</table>";
   webpage += "<br>";
   webpage += "<table>";
   webpage += "<tr><th>Time period</th><th>&nbsp;&nbsp;&nbsp;Consumption</th><th>&nbsp;&nbsp;&nbsp;Feed-in (Wh)</th></tr>";
@@ -1845,25 +1856,18 @@ void handleRoot() {
   webpage += "<tr><td>23:00..0:00</td><td>&nbsp;&nbsp;&nbsp;"+String(int(round(electricMeterHourlyConsumption[0]*1000)))+"</td><td>&nbsp;&nbsp;&nbsp;"+String(int(round(electricMeterHourlyFeedIn[0]*1000)))+"</td></tr>";
   webpage += "</table>";
   webpage += "<br>";
-  webpage += "<b>BMS</b><br>";
-  webpage += "<table>";
-  webpage += "<tr><td>State of charge:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.soc)+"%</td></tr>";
-  webpage += "<tr><td>State of health:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.soh)+"%</td></tr>";
-  webpage += "<tr><td>Charge voltage max:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.chargeVoltage,1)+"V</td></tr>";
-  webpage += "<tr><td>Charge current limit:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.chargeCurrentLimit,1)+"A</td></tr>";
-  webpage += "<tr><td>Discharge current limit:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.dischargeCurrentLimit,1)+"A</td></tr>";
-  webpage += "<tr><td>Discharge voltage min:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.dischargeVoltage,1)+"V</td></tr>";
-  webpage += "<tr><td>Voltage:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.voltage,2)+"V</td></tr>";
-  webpage += "<tr><td>Current:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.current,1)+"A</td></tr>";
-  webpage += "<tr><td>Temperature:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.temperature,1)+"&deg;C</td></tr>";
-  webpage += "<tr><td>Manufacturer:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.manufacturer)+"</td></tr>";
-  webpage += "<tr><td>Nr of packs in parallel:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(battery.nrPacksInParallel)+"</td></tr>";
-  webpage += "<tr><td>Protection flags 1:</td><td>&nbsp;&nbsp;&nbsp;</td><td>0x"+String(battery.protectionFlags1,HEX)+"</td></tr>";
-  webpage += "<tr><td>Protection flags 2:</td><td>&nbsp;&nbsp;&nbsp;</td><td>0x"+String(battery.protectionFlags2,HEX)+"</td></tr>";
-  webpage += "<tr><td>Warning flags 1:</td><td>&nbsp;&nbsp;&nbsp;</td><td>0x"+String(battery.warningFlags1,HEX)+"</td></tr>";
-  webpage += "<tr><td>Warning flags 2:</td><td>&nbsp;&nbsp;&nbsp;</td><td>0x"+String(battery.warningFlags2,HEX)+"</td></tr>";
-  webpage += "<tr><td>Request flags:</td><td>&nbsp;&nbsp;&nbsp;</td><td>0x"+String(battery.requestFlags,HEX)+"</td></tr>";
-  webpage += "</table>";
+  webpage += "Battery min: "+String(debugmin)+"%<br>";
+  webpage += "Battery max: "+String(debugmax)+"%<br>";
+  webpage += "ACin Umin: "+String(acVoltageMin, 2)+"V ("+secondsToTimeStr(timeAcVoltageMin+ELECTRIC_METER_TIME_OFFSET,true)+")<br>";
+  webpage += "ACin Umax: "+String(acVoltageMax, 2)+"V ("+secondsToTimeStr(timeAcVoltageMax+ELECTRIC_METER_TIME_OFFSET,true)+")<br>";
+  webpage += "AC frequency min: "+String(acFrequencyMin, 3)+"Hz ("+secondsToTimeStr(timeAcFrequencyMin+ELECTRIC_METER_TIME_OFFSET,true)+")<br>";
+  webpage += "AC frequency max: "+String(acFrequencyMax, 3)+"Hz ("+secondsToTimeStr(timeAcFrequencyMax+ELECTRIC_METER_TIME_OFFSET,true)+")<br>";
+  webpage += "DC Umin: "+String(dcVoltageMin, 2)+"V<br>";
+  webpage += "DC Umax: "+String(dcVoltageMax, 2)+"V<br>";
+  webpage += "DC discharge current max: "+String(dcCurrentMin,1)+"A ("+String(int(round(dcCurrentMin*NOM_VOLT)))+"W)<br>";
+  webpage += "DC charge current max: "+String(dcCurrentMax,1)+"A ("+String(int(round(dcCurrentMax*NOM_VOLT)))+"W)<br>";
+  webpage += "Multiplus temp. min: "+String(multiplusTempMin,1)+"&deg;C<br>";
+  webpage += "Multiplus temp. max: "+String(multiplusTempMax,1)+"&deg;C<br>";
   webpage += "<br>";
   webpage += "<a href=\"logfile.txt\">logfile.txt of last actions</a><br>";
   webpage += String(logfileCounter)+" bytes written since last logfile view";
