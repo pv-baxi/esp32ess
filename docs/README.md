@@ -28,12 +28,14 @@ from a convential RS485 transceiver circuit:
 
 The MAX485 circuit is connected to the ESP32 using the following three pins: DI, DE+RE(connected), RO. These pins are routed to the ESP32 through bidirectional level translators. For current pin assignment, please see "Constants"-section of the source code.
 
-Pinout on the RJ45 socket towards the Multiplus VE.Bus is as follows. Only pins 4 & 5 need to be connected, leave the other pins open: 
-* (Pin 1 = lowermost in my [photo](esp32ess_control_board.jpg))
-* Pin 4 = A = D+
-* Pin 5 = B = D-
+Pinout on the RJ45 socket towards the Multiplus VE.Bus is as follows:
+* (pin 1 = lowermost in my [photo](esp32ess_control_board.jpg))
+* pin 2 = Vin+ 12V
+* pin 3 = MK3_Gnd
+* pin 4 = A = D+
+* pin 5 = B = D-
 
-The complete pin assignment is provided by Victron on page 2 of the following [schematic](https://github.com/victronenergy/venusgx-hardware/blob/master/VE_BBB_Cape_v0.80_released.pdf).
+If you don't need the +12V (max. 700mW) supply voltage from the Multiplus, pins 2 & 3 can be left open and only pins 4 & 5 need to be connected. The complete pin assignment is provided by Victron on page 2 of the following [schematic](https://github.com/victronenergy/venusgx-hardware/blob/master/VE_BBB_Cape_v0.80_released.pdf).
 
 ### SN65HVD230 CAN bus transceiver
 
@@ -68,13 +70,7 @@ Here a photo of my implementation mounted in front of my power meter:
 
 ### DC-DC step-down regulator 7..12V to 5V
 
-Below is an extended pinout of the VE.Bus RJ45 connector. If a patch cable is used to connect the Multiplus to the control circuit, then the same pinout is also on the RJ45 socket of the control circuit:
-   * pin 2 = Vin+ 12V
-   * pin 3 = MK3_Gnd
-   * pin 4 = A = D+
-   * pin 5 = B = D-
-
-Vin+ is a 12V power source coming from the Multiplus. In my case I measured 11,65V without a sink and about 39 Ohms source impedance with a sink. Knowing that, about 700mW power can be drawn from Vin.
+On the VE.Bus RJ45 connector, Vin+ (pin 2) and MK3_Gnd (pin 3) is a 12V power source coming from the Multiplus. In my case I measured 11,65V without a sink and about 39 Ohms source impedance with a sink. Knowing that, about 700mW power can be drawn from Vin.
 
 This is not much, but enough to power the complete control circuit which takes about 90mA at 5V. For that I used the circuit from a cheap car-to-USB charger. My circuit uses the MC34063 chip. But other 12V to 5V step-down regulators, for example with chips MP2315 or MP2338 will surely work as well.
 
