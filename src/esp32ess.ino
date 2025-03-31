@@ -5,7 +5,9 @@ Implements an ESS system with Victron Multiplus II and Pylontech batteries.
 Instead by a Cerbo GX, the Multiplus is directly controlled by the ESP32 via
 the VE.Bus.
 
-NOTE: Code NOT working with Expressif esp32 board library 3.0.4. Use 3.0.3 instead!
+NOTE:
+Code was not working with Expressif esp32 board library 3.0.4. Version 3.1.1
+and later was verified to work again. 
 
 Documentation and latest source code can be found here:
 https://github.com/pv-baxi/esp32ess
@@ -48,6 +50,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 const int BUTTON_GPIO = 0;                            //on-devkit-board button is connected to GPIO 0
 const int RS=16, EN=13, D4=4, D5=5, D6=14, D7=15;     //HD44780 text display gpio pins
 const int CAN_RX_PIN = 22, CAN_TX_PIN = 21;           //Pylontech battery CAN = TWAI bus gpio pins
+const int SHELLY_CF = 23;                             //Pin with frequency pulses resulting in desired "power" on external Shelly 1PM
 const int VEBUS_RXD1=26, VEBUS_TXD1=25, VEBUS_DE=27;  //Victron Multiplus VE.bus RS485 gpio pins
 const int METER_IMPULSE_INPUT_PIN = 35;               //input pin from optical 1/10000kWh impulse output of power meter
 const int METER_SML_INPUT_PIN = 34;                   //input pin from optical SML data output of power meter
@@ -55,68 +58,65 @@ const int SML_TXD_UNUSED = 17;                        //some GPIO we need to wir
 const int RED_LED = 2;                                //output gpio pin with external red LED (active low)
 const int CPS = 10000;                  //CyclesPerSecond = How often per second our timer ISR is excuted
 const int WAITING_TIME_ACK = 0.9*CPS;   //How long we wait for the ESS command to be acknowledged by Multiplus. Comes normally between 25..43ms, so 1000 = 100ms makes sense
-const int8_t SOC_LIMIT_LOWEST = 3;      //stop logging soon & only allow half the logfile size if SOC <= SOC_LIMIT_LOWEST
-const int8_t SOC_INVERTER_ON_OFF = 15;  //15% switch to charge-only if below, or back to Inverter+Charger if above this battery level (exception: 'E'-mode)
+const int8_t SOC_ADAPT_LOWEST = 10;     //Reset socInverterOnOff to this value as soon as battery.soc reached 100% and is thus balanced again. Default = 10%
+const int8_t SOC_ADAPT_HIGHEST = 95;    //socInverterOnOff cannot become higher than this. Default = 95%
+const int8_t SOC_ADAPT_STEP = 3;        //increase socInverterOnOff by this amount of percent every day, until SOC_ADAPT_HIGHEST is reached or battery.soc reaches 100%, default=3%, off=0
+const int8_t SOC_TH_STRATEGY_OFFSET = 40; //Below (socInverterOnOff+SOC_TH_STRATEGY_OFFSET) with 2x Pylontech batteries, minimum power compensation strategy is used
 const int ESS_TIMEOUT_PREVENT = 5*CPS;  //Multiplus ESS is automatically disabled about 15 sec after last command written (FW v508), so every 5s we re-send ESS power, also to be safe in case of http timeouts
 const int BUTTON_DEBOUNCE_TIME = 0.1*CPS;//0.1 seconds gives good results
 const int BUTTON_LONGPRESS_TIME = 1.0*CPS;//1.0 seconds for a longpress
-const int LOGFILE_SIZE = 65510;         //Maximum text buffer that can be sent via HTTP is 65519 byte (2^16 -1 -16)
 const int SOC_WATCHDOG_CYCLES = 2.5*CPS;//time after which Multiplus is turned off in case there was no SOC received from battery (2.5 seconds)
 const char SWITCH_MODE_DEFAULT = 'A';   //Default switch mode to start with. For mode characters see function switchSpecialModes()
-const int ESS_STRATEGY_DEFAULT = 5;     //ESS power update strategy to use in Inverter+Charger mode (7=maximum, 5=immediate, 3=minimum, 0=0W)
-const int SWITCH_MODE_DURATION = 18*60*60*CPS;//automatically exit some specific switch modes after 18 hours (59 hours = Maximum!)
 const float NOM_VOLT = 48.0;            //Battery nominal voltage (for kWh estimation)
-const int ELECTRIC_METER_TIME_OFFSET = 10*60*60 +26*60 +1;  //To get time from meter runtime value (meter was installed in early summer at ~8am)
-const int32_t POWER_BATTERY_TO_SHELLY_SUM_MAX = 10* 60*60*1000;       //saturate powerBatteryToShellySum at 10 kWh
-const int32_t POWER_BATTERY_TO_SHELLY_THRESHOLD = 0.03* 60*60*1000;   //allow to sink 0.03 kWh before switching shellyState down and recharging battery again
 const float POWER_CAL = 0.998;   //Baxi=0.998: Calibration factor from powerMeter to Multiplus power. Multiplus should not apply more power than meter shows to keep regulation stable.
-const int SIZE_P_METER_RINGBUF = 15*60;     //How many last electric meter values are analysed for automatic mode switching (15 minutes)
-const int AUTOMATIC_MAXIMUM_MODE_DURATION = 45*60*CPS;  //+45 minutes after powerTrend got back below threshold
-const int POWER_TREND_TH = 10 *60*60;    //10Wh in Ws (Turning on 2200W once costs ~2.6Wh) (7Wh seemed too low, Wasching machine is abbout 1Wh/min)
+const int SIZE_POWER_TREND_RINGBUF = 15*60;     //How many last electric meter values are analysed for automatic mode switching (15 minutes)
+const int AUTOMATIC_MAXIMUM_MODE_DURATION = 30*60*CPS;  //if poor compensation is detected, switch to Min/Max strategy for 30 minutes
+const int POWER_TREND_TH = 10;            //10Wh (Turning on 2200W once costs ~2.6Wh) (7Wh seemed too low, Wasching machine is abbout 1Wh/min)
+const int CONSUMER_SHELLY_SWITCHING_INTERVAL = 3*60;  //IN SECONDS, use minimum 3 minutes to avoid problems with starting compressor motors
+const int ELECTRIC_METER_TIME_OFFSET = 9*60*60 +57*60 +7;  //To get time from meter runtime value (meter was installed in early summer at ~8am)
+const int16_t TRICKLE_CHARGE_POWER = 45;  //AC Power which is at minimum charged into battery in ChargeOnly case (includes Multiplus standby power)
+                                          //35W was not enough during night with 2 batteries, but seems to be exactly 0W BMS power with 1 battery
+                                          //40W still not enough during day while boiler turns on/off
+const int16_t CONSTANT_CHARGE_POWER = 540;  //AC Power in Watt which is used to charge the battery in 'C' mode (minus Multiplus standby power, minus 93% AC-DC eff.) 385W -> 350W BMS, 540W -> 500W BMS
+const int16_t POWER_TH_SHELLY_PLUS = 2100;  //If minimum feed-in is more than this, an additional consumer Shelly is turned on
+const int16_t POWER_TH_SHELLY_MINUS = 50;   //If minimum feed-in is less than this, the last consumer Shelly is turned off again
 
-//ShellyStates
-//-5 = all PV off,  all SINK on   (this is summer extreme)
-//-4 = 2nd PV off,  all SINK on   (Generator settings)
-//-3 = 1st PV off,  all SINK on
-//...
-// 0 = all PV on,   all SINK on   (initial setting)
-//...
-// 3 = all PV on,   2nd SINK on
-// 4 = all PV on,   1st SINK on   (Consumer settings)
-// 5 = all PV on,   all SINK off  (this is winter/night extreme)
-const int NR_CONSUMER_IP = 4;
-const char * CONSUMER_IP[]={
-    "192.168.178.14",   //Bit0 = boiler 2200W
-    "192.168.178.13",   //Bit1 = dehumidifier 250W
-    "192.168.178.11",   //Bit2 = triple socket outlet 800W
-    "192.168.178.12"    //Bit3 = switched socket 2000W
+const size_t N_CONSUMER_SHELLYS = 5;
+const char * CONSUMER_IP[N_CONSUMER_SHELLYS]={    //If there is excess power, 1st IP in list is enabled first, last IP is enabled last
+    "192.168.178.6",    //0 = warm water boiler 2000W
+    "192.168.178.15",   //1 = small heater 500W
+    "192.168.178.14",   //2 = Shelly Plug S white 800W
+    "192.168.178.12",   //3 = switched socket 2000W
+    "192.168.178.16"    //4 = Shelly Plug S black 1000W
+    // "192.168.178.11",   //5 = triple socket outlet
+    // "192.168.178.13",   //6 = dehumidifier 3L 210W
  };
-const int NR_CONSUMER_SETTINGS = 6;
-const uint8_t CONSUMER_SETTINGS[]={
-    0b1111,     //boiler+dehumidifier+800W+2000W
-    0b1011,    //boiler+dehumidifier+2000W
-    0b0111,    //boiler+dehumidifier+800W
-    0b0011,    //boiler+dehumidifier
-    0b0001,    //boiler only
-    0b0000    //all consumers off = 5
+
+struct SWITCH_CONDITION
+{
+    int8_t  shellyNr;   //ref to list of network IPs
+    int8_t  hourOn;     //0..23
+    int8_t  minOn;      //0..59
+    int8_t  hourOff;    //0..23
+    int8_t  minOff;     //0..59
+    int8_t  batteryThr; //0..100%
+    bool    startedChg; //true = battery must've charged a few percent this day; false = don't care, also allow rule during night
+};
+const SWITCH_CONDITION CONSUMER_RULES[] = {//};         //Note: Rule batteryThr goes on-top of adaptive inverter-On/Off-threshold ("0" means same as inverter on/off, "10" means 10% higher)
+// shelly hourOn:minOn hourOff:minOff batteryThr startedChg
+     {0,     6,     0,    10,    30,      15,      true},   //warm water boiler - morning
+     {0,    10,    30,    12,     0,      20,      true},   //warm water boiler - noon
+     {0,    12,     0,    14,     0,      35,      true},   //warm water boiler - afternoon
+     {0,    14,     0,    22,     0,      65,      true}    //warm water boiler - evening
+//   {5,     9,     0,    18,     0,      70,      true},   //dehumidifier 210W 3L
+//   {1,     7,     0,    22,    50,      70,      true},   //small heater 500W
+//   {2,     7,     0,    17,     0,      71,      true},   //Shelly Plug S 800W
+//   {3,     6,    15,    22,     0,      72,      true},   //switched socket 2000W
+//   {4,    12,     0,    24,     0,      73,      true},   //triple socket outlet 1000W
+//   {6,     8,     0,    18,     0,      73,      true}    //dehumidifier 7L 250W
+// shelly hourOn:minOn hourOff:minOff batteryThr startedChg
  };
-const int NR_GENERATOR_IP = 5;
-const char * GENERATOR_IP[]={
-    "192.168.178.31",   //G_W
-    "192.168.178.32",   //F_W
-    "192.168.178.35",   //R1
-    "192.168.178.36",   //R2
-    "192.168.178.37"    //R3
- };
-const int NR_GENERATOR_SETTINGS = 6;
-const uint8_t GENERATOR_SETTINGS[]={
-    0b11111,    //all PV on
-    0b01111,    //R3 off
-    0b00111,    //R3+R2 off
-    0b00011,    //R3+R2+R1 off
-    0b00001,    //R3+R2+R1+F_W off
-    0b00000     //all PV off = 5
- };
+
 
 
 // #############################################################################
@@ -128,8 +128,11 @@ const uint8_t GENERATOR_SETTINGS[]={
 //
 // #############################################################################
 
-boolean chargeFromACin = true;      //allow negative ESS power (ACin-based charging from power "before" the Multiplus = ACin, L2 or L3). Set to false if PV is only connected to ACout2
-boolean timeIsValid = false;        //Set to true once we got a valid time, e.g. (electricMeter_Runtime + ELECTRIC_METER_TIME_OFFSET) from power meter
+bool chargeFromACin = true;      //allow negative ESS power (ACin-based charging from power "before" the Multiplus = ACin, L2 or L3). Set to false if PV is only connected to ACout1
+bool timeIsValid = false;        //Set to true once we got a valid time, e.g. (electricMeter_Runtime + ELECTRIC_METER_TIME_OFFSET) from power meter
+bool chargeOnly = false;
+const int8_t BATTERY_STARTED_CHARING_OFFSET = 5;
+bool batteryStartedCharging = true; //To monitor once battery charged again (BATTERY_STARTED_CHARING_OFFSET percent) on a new day
 char frbuf0[256];                   //assembles one complete frame received by Multiplus
 char frbuf1[256];                   //frame without replacement
 char txbuf1[64];                    //buffer for assembling bare command towards Multiplus (without replacements or checksum)
@@ -140,6 +143,7 @@ byte frameNr = 0;                   //Last frame number received from Multiplus.
 int synccnt = 0;                    //Counts every 5 received sync frames in veBusHandling(), sending CommandReadRAMVar 10 times per second
 int veCmdCounter = 0;               //Counts the number of ESS commands sent to Multiplus, including the failed ones.
 int16_t essPowerTmp = 0;            //continiously updated ESS power value coming out ouf calculation
+int16_t essPowerTmp2 = 0;           //ESS power value after calculation and after discharge/charge power limitation
 int16_t essPowerDesired = 0;        //This value will be written into Multiplus when setting veCmdSendState = 2; negative = charging battery; positive = feed into grid
 int impulseMeterPower = 0;          //electric meter value measured from 1/10kWh impulses
 int decisiveMeterPower = 0;         //electric meter value used in calculations and decisions
@@ -147,11 +151,15 @@ byte veCmdSendState = 0;            //2 ready to send; 0x1X has been send but no
 int veTxCmdFailCnt = 0;             //Counts the number of commands that were not acknowledged by Multiplus and had to be resent.
 int veRxCmdFailCnt = 0;             //amount of received VE.Bus commands with wrong checksum
 char switchMode = SWITCH_MODE_DEFAULT;//Switches the program between different user modes, see function switchSpecialModes().
-char logfile[LOGFILE_SIZE];         //logfile buffer, used as ringbuffer with pointer below
-int p_logfile = 0;                  //pointer to logfile ringbuffer
-int logfileCounter = 0;             //counts every byte written into logfile
-int logfileCounterStop = 0;         //in case logging has to stop soon (to keep failure log), this symbol contains the maximum logfile size when logging has to stop.
-boolean stopWritingLogfile = false; //writing to logfile will be stopped in X bytes in order to not overwrite important events
+const int LOGFILE_ALL_SIZE = 60000; //Maximum text buffer that can be sent via HTTP is 65519 byte (2^16 -1 -16)
+char logfileAll[LOGFILE_ALL_SIZE];  //logfile buffer, used as ringbuffer with pointer below
+int p_logfileAll = 0;               //pointer to logfileAll ringbuffer
+int logfileAllCounter = 0;          //counts every byte written into logfileAll
+const int LOGFILE_FEW_SIZE = 5510;  //Maximum text buffer that can be sent via HTTP is 65519 byte (2^16 -1 -16)
+char logfileFew[LOGFILE_FEW_SIZE];  //logfile buffer, used as ringbuffer with pointer below
+int p_logfileFew = 0;               //pointer to logfileFew ringbuffer
+int logfileFewCounter = 0;          //counts every byte written into logfileFew
+String webpage;
 struct {                            //Struct of Pylontech BMS values:
   int16_t soc = -1;                   //Battery level 0-100% (negative = invalid)
   int16_t socMin = 999999;              //used to log minimum battery level
@@ -165,6 +173,7 @@ struct {                            //Struct of Pylontech BMS values:
   float dischargeVoltage = -1;
   float voltage = -1;
   float current = -1;
+  int power = -1;
   float temperature = -1;
   char manufacturer[9] = {0};
   int8_t nrPacksInParallel = -1;
@@ -174,36 +183,32 @@ struct {                            //Struct of Pylontech BMS values:
   uint8_t warningFlags2 = 0;
   uint8_t requestFlags = 0;
 } battery;
+int16_t socInverterOnOff = 50;  //Adaptive SOC-low threshold. Switch to charge-only if below, or back to Inverter+Charger if above this battery level; Increased every day to ensure that battery reaches 100% for balancing from time to time; start with 50% after reboot
+double bmsPowerAverage = 0;
+float alpha = 0.03;                                //averaging factor for bmsPowerAverage (0.03 is ~ 5 minutes)
 float batteryTempMin = 999;
 float batteryTempMax = -999;
 float batteryCurrentMin = 999;
 float batteryCurrentMax = -999;
-float batteryPowerMin = 99999;
-float batteryPowerMax = -99999;
-boolean newImpulseMeterPower = false;   //new power value is ready from impulse + resticted-digital meter output (less often/accurate)
-boolean newDigitalMeterPower = false;   //new power value is ready from full-digital meter output (full precision)
+int batteryPowerMin = 99999;
+int batteryPowerMax = -99999;
+bool newImpulseMeterPower = false;   //new power value is ready from impulse + resticted-digital meter output (less often/accurate)
+bool newDigitalMeterPower = false;   //new power value is ready from full-digital meter output (full precision)
 int infoDssCntSinceLastMeterPower = 0;  //counts all valid Info-DSS messages since last meter power value. Used to detect if meter currently delivers full or restricted data
-boolean newMeterValue = false;      //indicating to various functions that we got a new power meter measurement result
+bool newMeterValue = false;      //indicating to various functions that we got a new power meter measurement result
 char sBuf[1024];                    //Circular buffer, stores received SML stream from power meter; Size must be power of 2 and bigger (or equal) than SML_LENGTH_MAX
 uint16_t smlp = 0;                  //Pointer into SML buffer, used as circular pointer
 const int SML_LENGTH_MAX = 512;     //This is the maximum length we allow for the SML stream (eBZ DD3 meter: 352 byte full / 256 byte reduced)
 char sBuf2[SML_LENGTH_MAX];         //linear buffer with SML stream
 uint16_t smlCnt = 0;                //counter to count length of SML stream
 uint16_t smlLength = 0;             //detected length of SML stream
-int gridSetpoint = -10;             //Negative always feed a bit into the grid, positive always consumes a bit from the grid (-10W = 0.25kWh feed-in per day)
+int gridSetpoint = 0;               //Power compensation offset: negative always feed a bit into the grid, positive always consumes a bit from the grid (-10W = 0.25kWh feed-in per day); NOTE: High positive values with (chargeFromACin==true) might result in charging battery from grid!
 
 //Classes
 TaskHandle_t Task0;
 hw_timer_t *My_timer = NULL;
 LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 WebServer server(80);
-
-// Current time
-unsigned long currentTime = millis();
-// Previous time
-unsigned long previousTime = 0; 
-// Define timeout time in milliseconds (example: 2000ms = 2s)
-const long timeoutTime = 2000;
 
 CRC16 crc(0x1021, 0xFFFF, 0xFFFF, true, true);
 //Multiplus variables
@@ -232,7 +237,7 @@ byte    multiplusStatus80 = 23;                 //00=ok, 02=battery low
 byte    multiplusVoltageStatus;                 //11=ACin_disconnected, 12=inverter_off, 13=Battery_good_inverter_on, 16=will not invert, 17=Moment_of_ACin_interruption, 19=Moment_of_ACin_back_on
                                                 //If Multiplus starts with "mains on" blinking, it will not allow inverting, even if it is in Charge+Invert mode. Then multiplusVoltageStatus = 16/17 depending on the mode.
                                                 //If Multiplus starts correctly with "inverter on" and then synchronizing to mains, then multiplusVoltageStatus = 12/13 depending on the mode.
-byte    multiplusEmergencyPowerStatus;          //00=mains, 02=in_emergency_power_mode (=state of ACin relay)
+byte    multiplusEmergencyPowerStatus = 0;      //00=mains, 02=in_emergency_power_mode (=state of ACin relay)
 byte    masterMultiLED_LEDon = 123;             //Bits 0..7 = mains on, absorption, bulk, float, inverter on, overload, low battery, temperature
 byte    masterMultiLED_LEDblink = 234;          //(LEDon=1 && LEDblink=1) = blinking; (LEDon=0 && LEDblink=1) = blinking_inverted 
 byte    masterMultiLED_Status = 12;             //0=ok, 2=battery low
@@ -251,13 +256,14 @@ float    multiplusDcVoltage;
 byte     multiplusE4_byte17;
 byte     multiplusE4_byte18;
 float    multiplusUMainsRMS;
-int16_t  multiplusPmainsFiltered;
-int16_t  multiplusPinverterFiltered;
+int16_t  multiplusPmainsFiltered;               //multiplusPmainsFiltered is always exactly -(multiplusPinverterFiltered+multiplusPoutputFiltered)
+int16_t  multiplusPinverterFiltered;            //multiplusPinverterFiltered is always exactly -(multiplusPmainsFiltered+multiplusPoutputFiltered)
+//int16_t  multiplusPoutputFiltered;              //multiplusPoutputFiltered is always exactly -(multiplusPmainsFiltered+multiplusPinverterFiltered)
 
 //Power meter variables
 char     electricMeter_DeviceID[10];                         //electric meter device ID (we assume 10 bytes)
-char     electricMeter_Status180[3];                         //Status sent with 1.8.0 (consumption)
-char     electricMeter_Status280[3];                         //Status sent with 2.8.0 (feed-in)
+const int MAX_METER_STATUS_BYTES = 4;
+char     electricMeter_Status180[MAX_METER_STATUS_BYTES];    //Status sent with 1.8.0 (Only consumption status is sent by every meter.)
 double   electricMeter_Consumption = 0;                      //kWh value 1.8.0
 double   electricMeter_FeedIn = 0;                           //kWh value 2.8.0
 uint32_t electricMeter_Runtime = -ELECTRIC_METER_TIME_OFFSET;  //meter runtime in seconds; initialize to 00:00:00 real time
@@ -270,9 +276,8 @@ int      electricMeterCRCwrong = 0;                          //count every SML s
 int      electricMeterSignPositive = 0;                      //how often within the last power measurement interval we got a positive sign from status
 int      electricMeterSignNegative = 0;                      //how often within the last power measurement interval we got a negative sign from status
 int      electricMeterCurrentSign = 0;                       //by default we are undecided and set power = 0W
-int16_t    estTargetPower = 0;                                 //current target from electric meter and powerACin for ESS power 
-int      essPowerStrategy = 0;                               //Strategy currently used: 7=maximum, 5=immediate, 3=minimum, 0=0W
-int      essStrategySelected = ESS_STRATEGY_DEFAULT;         //Strategy that should normally be used, or that was selected
+int16_t  estTargetPower = 0;                                 //current ESS power target, calculated from electric meter and powerACin
+int      essPowerStrategy = 5;                               //Strategy currently used: 7=maximum, 5=immediate, 3=minimum, 0=0W
 const int SIZE_PWR_RINGBUF = 45;                             //45 seconds
 int16_t estTargetPowerRingBuf[SIZE_PWR_RINGBUF] = {0};       //ringbuffer of estTargetPower of the last SIZE_PWR_RINGBUF seconds for ESS power strategies
 int ptrPowerRingBuf = 0;                                     //start with 1st element in ringBuffer
@@ -284,17 +289,23 @@ const int SIZE_P_INVERTER_RINGBUF = 32;                      //How many last mul
 int16_t pInverterRingBuf[SIZE_P_INVERTER_RINGBUF] = {0};     //ring buffer of last multiplusPinverterFiltered values, coming due to CommandReadRAMVar every 100ms
 int ptr_pInverterRingBuf = 0;                                //start with 1st element in ringBuffer
 int16_t powerInverter = 0;                                   //power out of inverter, synchronized from pInverterRingBuf[], with value from electric meter
-int16_t powerLeftover = 0;                                   //feed-in PV power which is left over and not coming from the battery
-int32_t powerBatteryToShellySum = 0;                         //counts the energy (in positive Ws) we've put from battery into the Shellys, since last shellyState increase
 
-int     shellyState = 0;                                     //Start with 0 = all PV on, all SINK on
-bool    shellysInitialized = false;                          //is set to true after Shellys are initialized
+int     shellyState = 0;                                     //Init with 0 = all consumers OFF (1=1st consumer ON, 2=1st+2nd consumer ON etc.)
 int     shellyActuations = 0;                                //counts how often the set of Shellys have been controlled
 int     shellyFails = 0;                                     //counts how often a single Shelly did not acknowledge a switch http command
+int8_t  shellyConsumer[N_CONSUMER_SHELLYS] = {0};            //per Shelly: 0 = unknown state, -1 = off, +1 = on
+int     nrShellysEnabledByRule = 0;                          //How many Shellys are currently turned ON by CONSUMER_RULES[]
 
-const int SIZE_P_LEFTOVER_RINGBUF = 180;                     //180s = 3min, Must be definitely more than SIZE_PWR_RINGBUF !! to also work with maximum strategy
-int16_t pLeftoverRingBuf[SIZE_P_LEFTOVER_RINGBUF] = {0};
-int ptr_pLeftoverRingBuf = 0;
+const int SIZE_SHELLY_POWER_RINGBUFFERS = CONSUMER_SHELLY_SWITCHING_INTERVAL - 30;     //use 30 seconds less to give consumers some time to start before DC current averagaing begins
+int16_t powerChargerRingBuf[SIZE_SHELLY_POWER_RINGBUFFERS] = {0};                      //ringbuffer of AC power: pos=charging, neg=inverting
+int     ptr_powerChargerRingBuf = 0;
+int32_t averageChargingPower = 0;
+int16_t powerControlDeviationRingBuf[SIZE_SHELLY_POWER_RINGBUFFERS] = {0};           //positive values mean feed-in; negative values mean consumption
+int     ptr_powerControlDeviationRingBuf = 0;
+int32_t averageControlDeviationFeedIn = 0;
+int16_t powerMeterRingBuf[SIZE_SHELLY_POWER_RINGBUFFERS] = {0};           //positive values mean feed-in; negative values mean consumption
+int     ptr_powerMeterRingBuf = 0;
+int32_t minimumFeedIn = 0;
 
 double  electricMeterHourlyConsumption[24] = {0};           //consumptions for each expired hour [0]=23:00..0:00 ; [9]=8:00..9:00 ; [23]=22:00..23:00
 double  electricMeterConsumptionOneHourAgo = -100;          //negative means value not initialized yet
@@ -304,22 +315,20 @@ double  electricMeterFeedInOneHourAgo = -100;               //negative = value n
 double  electricMeter24hFeedIn = 0;                         //sum of feed-in over all 24 hourly values
 int     timeNewHourDone = -100;                             //negative = value not initialized yet
 
-double chargeEfficiency = 59;                               //average measured charge efficiency from AC to battery(BMS)
-double dischargeEfficiency = 59;                            //average measured discharge efficiency from battery(BMS) to AC
-float alpha = 0.1;                                          //averaging factor for efficiencies
-
 double multiplusDcVoltageCalibration = 0;                   //averaging calibration offset, updated whenever DC current < 1.5A
 uint32_t multiplusDcVoltageCalibrationCnt = 0;              //How often DC voltage calibration was updated
-double chargeCableResistance = 0;                           //averaged from Multiplus-BMS voltage difference divided by BMS current (in mOhm)
+double chargeCableResistance = 0;                           //averaged from Multiplus-BMbetaS voltage difference divided by BMS current (in mOhm)
 uint32_t chargeCableResistanceCnt = 0;                      //How often chargeCableResistance was updated
 double dischargeCableResistance = 0;                        //averaged from Multiplus-BMS voltage difference divided by BMS current (in mOhm)
 uint32_t dischargeCableResistanceCnt = 0;                   //How often dischargeCableResistance was updated
 float beta = 0.001;                                         //averaging factor for cable resistances
 
-int16_t pMeterRingBuf[SIZE_P_METER_RINGBUF] = {0};
-int ptr_pMeterRingBuf = 0;                                  //start with 1st element in ringBuffer
-int32_t powerTrend = 0;                                     //summed positive (consumption) power over complete ringbuffer (in Ws if meter value comes every second)
-uint32_t essPowerStrategy7ontime = 0;                       //counts how many seconds we used maximum ESS power strategy
+int16_t powerTrendRingBuf[SIZE_POWER_TREND_RINGBUF] = {0};          //to calculate 15min power trend, used by automatic strategy switching
+int ptr_powerTrendRingBuf = 0;                                  //start with 1st element in ringBuffer
+float powerTrendConsumption = 0;                            //summed positive (consumption) power over complete ringbuffer (in Ws if meter value comes every second)
+float powerTrendFeedIn = 0;                                 //summed negative (feed-in) power over complete ringbuffer (in Ws if meter value comes every second)
+uint32_t secondsInMinStrategy = 0;                       //counts how many seconds we used Min ESS power strategy
+uint32_t secondsInMaxStrategy = 0;                       //counts how many seconds we used Max ESS power strategy
 
 bool oneSecondOver = false;        //set to true every second (to write the time into logfile)
 bool oneMinuteOver = false;        //set to true every minute (to write the time into logfile)
@@ -340,23 +349,24 @@ bool oneMinuteOver = false;        //set to true every minute (to write the time
 volatile int cmdAckCnt = 0;                 //counter down-counting the time it takes for Multiplus acknowledging an ESS command
 volatile int essTimeoutCounter = ESS_TIMEOUT_PREVENT; //Multiplus disables ESS if no value is written within 15 seconds
 volatile int socWatchdog = 20000;           //timer to turn off Multiplus in case there was no SOC received from battery; start with 2 seconds, so that no CAN bus error is displayed on reboot
-volatile int specialModeCnt = SWITCH_MODE_DURATION;   //timer to automatically turn off special mode after XX minutes
-volatile int automaticMaximumModeCnt = 0;   //Counter turning off Maximum mode in 'A' automatic program
+volatile int automaticMinMaxModeCnt = 0;    //Counter turning off Maximum mode in 'A' and 'S' automatic programs
 volatile int buttonPressCnt = -1;           //Initialize button-press counter in locked (paused) state
 volatile int cylTime = 0;                   //counts ISR calls up to one second (= CPS) and is than reset to 0 again
-volatile int shellyWaitCnt = (SIZE_P_LEFTOVER_RINGBUF+10)*CPS; //ShellyControl waiting timer. Start not before the leftover-power ringbuffer is valid + 10 seconds
+volatile int shellyWaitCnt = CONSUMER_SHELLY_SWITCHING_INTERVAL*CPS;  //Shelly-control waiting timer. Start not before 3 minutes.
 volatile bool isrOneSecondOver = false;     //set to true every second
 volatile int minuteTimer = 0;               //relative time, unit = 100ms, on 1000 resets to 0
 volatile bool isrOneMinuteOver = false;     //set to true every minute
 //for digital meter pulse measurement:
-volatile boolean IRpinDisplay = LOW;        //remember state of IR input pin to let LED blink once in main loop
+volatile bool IRpinDisplay = LOW;        //remember state of IR input pin to let LED blink once in main loop
 volatile int highCnt = 1000;                //how long the high-pulse took. Normal is 20 = 2ms. Initialize with higher value, meaning no valid measurement
 volatile int totalCnt = 4000000;            //how long the complete measurement (high-pulse plus low time) took. Initialize with some very high value meaning very low power
 volatile int highCycles = 0;                //length of the concluding high pulse
 volatile int highCyclesPrevious = 0;        //to validate if a power measurement also include the length of the preceding high pulse
 volatile int totalCycles = 0;               //length of complete power measurent (high+low pulse)
-volatile boolean meterHighPulse = false;    //current state: true = within high-pulse; false = within low pulse
-volatile boolean isrNewMeterPulse = false;  //indicating that new meter impulse came in
+volatile bool meterHighPulse = false;    //current state: true = within high-pulse; false = within low pulse
+volatile bool isrNewMeterPulse = false;  //indicating that new meter impulse came in
+volatile int shelly1PMcnt = 0;
+volatile int shelly1PMpulsewidth = 100;
 
 // ===========================================================================
 //                Timer ISR - executed 10000 times per second
@@ -371,8 +381,7 @@ void IRAM_ATTR onTimer()
   if (essTimeoutCounter > 0) essTimeoutCounter--;
   if (cmdAckCnt > 0) cmdAckCnt--;
   if (socWatchdog > 0) socWatchdog--;     //watchdog timer ensuring that SOC value is received from battery
-  if (specialModeCnt > 0) specialModeCnt--;   //Comment out to keep Special Mode infintitely until next button press
-  if (automaticMaximumModeCnt > 0) automaticMaximumModeCnt--;
+  if (automaticMinMaxModeCnt > 0) automaticMinMaxModeCnt--;
   if (shellyWaitCnt > 0) shellyWaitCnt--;
   cylTime++;
   if (cylTime >= CPS) {
@@ -383,7 +392,13 @@ void IRAM_ATTR onTimer()
       minuteTimer = 0;          //overflow at 60 seconds
       isrOneMinuteOver = true;  //set one-minute-flag from ISR
     }
-
+  }
+  //Code for outputting SOC to external Shelly 1PM
+  shelly1PMcnt++;
+  if (shelly1PMcnt == shelly1PMpulsewidth-1) digitalWrite(SHELLY_CF, HIGH);
+  else if (shelly1PMcnt >= shelly1PMpulsewidth) {
+    digitalWrite(SHELLY_CF, LOW);
+    shelly1PMcnt = 0;
   }
   //============================================================================================================
   //The following code is for reading the optical 1/10000kWh impulses from the power meter.
@@ -391,7 +406,7 @@ void IRAM_ATTR onTimer()
   // Disadvantage: Power value is always positive, there is no information if currently consumption or feed-in.
       totalCnt++;
       highCnt++;
-      boolean IRpin = digitalRead(METER_IMPULSE_INPUT_PIN); //read IR input at this moment
+      bool IRpin = digitalRead(METER_IMPULSE_INPUT_PIN); //read IR input at this moment
       if (IRpin==HIGH) IRpinDisplay=HIGH;   //if it was high, remember to display later (but don't reset to LOW here)
       if ((!meterHighPulse) && (IRpin == HIGH))    //if we are within the low-period and detect a high-pulse
       {
@@ -425,6 +440,32 @@ void IRAM_ATTR onTimer()
 // ###################################################
 
 
+void secondsToTime(int &hours, int &minutes, int &seconds, uint32_t largeSeconds)
+{
+  uint32_t t = largeSeconds;
+  int s = t % 60;       //get the seconds
+  t = (t - s)/60;
+  int m = t % 60;       //get the minutes
+  t = (t - m)/60;
+  int h = t % 24;       //get the hours
+  seconds = s;
+  minutes = m;
+  hours = h;
+}
+
+
+String secondsToTimeStr(uint32_t seconds, bool includeSeconds)
+{
+  int h = 0;
+  int m = 0;
+  int s = 0;
+  secondsToTime(h, m, s, seconds);
+  char time[9];
+  if (includeSeconds) sprintf(time,"%02d:%02d:%02d",h,m,s); else sprintf(time,"%02d:%02d",h,m);
+  return time;
+}
+
+
 void relativeTimers()
 //This function ensures that the time flags are true for exactly one execution of the loop() function and then false again.
 {
@@ -445,7 +486,6 @@ void relativeTimers()
 }
 
 
-
 // ===========================================================================
 //                      Adds string to logfile buffer
 // ---------------------------------------------------------------------------
@@ -453,43 +493,58 @@ void relativeTimers()
 // needed. Function does NOT add \n, this needs to be added manually.
 // Number of bytes written to logfile are counted to be shown on main webpage.
 // ===========================================================================
-void addToLogfile(String s)
+void addToLogfile(String s, int destination)
 {
-  if (!stopWritingLogfile || (logfileCounter < logfileCounterStop))
-  {
+  //Add to ALL-Logfile if desired
+  if (destination & 1) {
     for (int i=0; i<s.length(); i++)
     {
-      logfile[p_logfile++]=s[i];
-      if (p_logfile==LOGFILE_SIZE) p_logfile=0;   //wrap pointer around at end of buffer
-      logfileCounter++;   //increase logfile size counter
+      logfileAll[p_logfileAll++]=s[i];
+      if (p_logfileAll==LOGFILE_ALL_SIZE) p_logfileAll=0;   //wrap pointer around at end of buffer
+      logfileAllCounter++;   //increase logfile size counter
+    }
+  }
+  //Add to FEW-Logfile if desired
+  if (destination & 2) {
+    if (s[0]=='\n') {
+      String t = "\n"+secondsToTimeStr(electricMeter_Runtime+ELECTRIC_METER_TIME_OFFSET,false);
+      for (int i=0; i<t.length(); i++)
+      {
+        logfileFew[p_logfileFew++]=t[i];
+        if (p_logfileFew==LOGFILE_FEW_SIZE) p_logfileFew=0;   //wrap pointer around at end of buffer
+        logfileFewCounter++;   //increase logfile size counter
+      }
+    }
+    for (int i=0; i<s.length(); i++)
+    {
+      logfileFew[p_logfileFew++]=s[i];
+      if (p_logfileFew==LOGFILE_FEW_SIZE) p_logfileFew=0;   //wrap pointer around at end of buffer
+      logfileFewCounter++;   //increase logfile size counter
     }
   }
 }
 
 void addFrameToLogfile(char *frame, int startbyte, int endbyte)
 {
-  if (!stopWritingLogfile || (logfileCounter < logfileCounterStop))
+  logfileAll[p_logfileAll++]='\n';
+  if (p_logfileAll==LOGFILE_ALL_SIZE) p_logfileAll=0;   //wrap pointer around at end of buffer
+  logfileAllCounter++;   //increase logfile size counter
+  for (int i=startbyte; i<=endbyte; i++)
   {
-    logfile[p_logfile++]='\n';
-    if (p_logfile==LOGFILE_SIZE) p_logfile=0;   //wrap pointer around at end of buffer
-    logfileCounter++;   //increase logfile size counter
-    for (int i=startbyte; i<=endbyte; i++)
-    {
-      char c = frame[i];
-      char n = (c >> 4) | 48;
-      if (n > 57) n = n+7;
-      logfile[p_logfile++]=n;
-      if (p_logfile==LOGFILE_SIZE) p_logfile=0;   //wrap pointer around at end of buffer
-      logfileCounter++;   //increase logfile size counter
-      n = (c & 0x0F) | 48;
-      if (n > 57) n = n+7;
-      logfile[p_logfile++]=n;
-      if (p_logfile==LOGFILE_SIZE) p_logfile=0;   //wrap pointer around at end of buffer
-      logfileCounter++;   //increase logfile size counter
-      logfile[p_logfile++]=' ';
-      if (p_logfile==LOGFILE_SIZE) p_logfile=0;   //wrap pointer around at end of buffer
-      logfileCounter++;   //increase logfile size counter
-    }
+    char c = frame[i];
+    char n = (c >> 4) | 48;
+    if (n > 57) n = n+7;
+    logfileAll[p_logfileAll++]=n;
+    if (p_logfileAll==LOGFILE_ALL_SIZE) p_logfileAll=0;   //wrap pointer around at end of buffer
+    logfileAllCounter++;   //increase logfile size counter
+    n = (c & 0x0F) | 48;
+    if (n > 57) n = n+7;
+    logfileAll[p_logfileAll++]=n;
+    if (p_logfileAll==LOGFILE_ALL_SIZE) p_logfileAll=0;   //wrap pointer around at end of buffer
+    logfileAllCounter++;   //increase logfile size counter
+    logfileAll[p_logfileAll++]=' ';
+    if (p_logfileAll==LOGFILE_ALL_SIZE) p_logfileAll=0;   //wrap pointer around at end of buffer
+    logfileAllCounter++;   //increase logfile size counter
   }
 }
 
@@ -559,6 +614,7 @@ int prepareCommandReadRAMVar(char *outbuf, byte desiredFrameNr)
   outbuf[j++] = 0;              //0=UmainsRMS             1st RAM ID (up to 6 possible)
   outbuf[j++] = 15;             //15=PmainsFiltered       2nd RAM ID
   outbuf[j++] = 14;             //14=PinverterFiltered    3rd RAM ID
+  //outbuf[j++] = 16;             //16=PoutputFiltered      4th RAM ID
   return j;
 }
 
@@ -726,7 +782,10 @@ bool decodeVEbusFrame(char *frame, int len)
             multiplusDcCurrent = t/10.0;
             if (multiplusDcCurrent < dcCurrentMin) dcCurrentMin = multiplusDcCurrent;
             if (multiplusDcCurrent > dcCurrentMax) dcCurrentMax = multiplusDcCurrent;
-            multiplusEmergencyPowerStatus = frame[12];
+            if (frame[12] != multiplusEmergencyPowerStatus) {   //If emergency power status has changed:
+              multiplusEmergencyPowerStatus = frame[12];
+              addToLogfile("\nmultiplusEmergencyPowerStatus = "+String(multiplusEmergencyPowerStatus),3);
+            }
             if ((frame[11] & 0xF0) == 0x30) {
               multiplusTemp = frame[15]/10.0 *2.0 -8.0;  //my guess: (*2.0 - 8°C) as otherwise temperature is too low
               if (multiplusTemp < multiplusTempMin) multiplusTempMin = multiplusTemp;
@@ -786,14 +845,15 @@ bool decodeVEbusFrame(char *frame, int len)
             if ((veCmdSendState==0x12) && (cmdAckCnt > 0))    //if ACK was received in time
             {
               multiplusESSpower = essPowerDesired;              //Update ESS power value successfully applied in Multiplus
-              if (minuteTimer < 10) addToLogfile("\n "+String(minuteTimer)); else addToLogfile("\n"+String(minuteTimer));
-              addToLogfile(" "+String(multiplusESSpower));     //Write applied ESS power to logfile
+              // if (minuteTimer < 10) addToLogfile("\n "+String(minuteTimer)); else addToLogfile("\n"+String(minuteTimer));
+              // addToLogfile(" "+String(multiplusESSpower));     //Write applied ESS power to logfile
+              addToLogfile(".",1);     //Indicate successful application to Multiplus with a dot only, to save Logfile space
               essTimeoutCounter = ESS_TIMEOUT_PREVENT;          //restart ESS timeout counter
               veCmdSendState = 0;                               //sending command is done
             }
             result = true; //mark as known frame
           }
-          if ((len == 15) && (frame[5] == 0xE6) && (frame[6] == 0x85))    //Reply to CommandReadRAMVar (automatically polled 10 times per second, no re-send)
+          if ((len == 15) && (frame[5] == 0xE6) && (frame[6] == 0x85))    //Reply to CommandReadRAMVar (automatically polled 10 times per second, no re-send), len==15 with 3 values
           {
             int16_t t = (frame[8]<<8) + frame[7];
             multiplusUMainsRMS = t/100.0;
@@ -811,7 +871,8 @@ bool decodeVEbusFrame(char *frame, int len)
             multiplusPinverterFiltered = (frame[12]<<8) + frame[11];
             ptr_pInverterRingBuf = (ptr_pInverterRingBuf + 1) & (SIZE_P_INVERTER_RINGBUF-1);         //increase and wrap pointer first
             pInverterRingBuf[ptr_pInverterRingBuf] = multiplusPinverterFiltered;   //now write newest value into ringbuffer
-          //if (multiplusPinverterFiltered>=0) addToLogfile("\n+"+String(multiplusPinverterFiltered)); else addToLogfile("\n"+String(multiplusPinverterFiltered)); //uncomment to log every value
+            //multiplusPoutputFiltered = (frame[14]<<8) + frame[13];      //note that multiplusPoutputFiltered is negated compared to multiplusPmainsFiltered
+            //addToLogfile("\n"+String(multiplusPmainsFiltered)+" "+String(multiplusPinverterFiltered)+" "+String(multiplusPoutputFiltered)); //uncomment to log every value
             result = true; //mark as known frame
           }
           if ((frame[5] == 0xE6) && (frame[6] == 0x8E)) {
@@ -842,11 +903,11 @@ bool decodeVEbusFrame(char *frame, int len)
             if (cmdAckCnt > 0)
             {
               if ((veCmdSendState==0x17) && ((masterMultiLED_SwitchRegister&0x03)==0x03)) {
-                addToLogfile("\n-> Switched Multiplus to Charger+Inverter mode");
+                addToLogfile("\n-> Switched Multiplus to Charger+Inverter mode",3);
                 veCmdSendState = 0;                             //sending mode=Charger+Inverter mode is done
               }
               if ((veCmdSendState==0x15) && ((masterMultiLED_SwitchRegister&0x03)==0x01)) {
-                addToLogfile("\n-> Switched Multiplus to Charger-Only mode");
+                addToLogfile("\n-> Switched Multiplus to Charger-Only mode",3);
                 veCmdSendState = 0;                             //sending mode=ChargerOnly mode is done
               }
             }
@@ -878,7 +939,7 @@ void veCmdReSendHandling()
   {
     veCmdSendState = veCmdSendState & 0x0F;       //Re-send command
     veTxCmdFailCnt++;     //increase failed commands counter
-    addToLogfile(" FAILcmd"+String(veCmdSendState,HEX));
+    addToLogfile(" FAILcmd"+String(veCmdSendState,HEX),3);
   }
 }
 
@@ -917,11 +978,9 @@ bool applyNewEssPower(int16_t power)
 // values are below each other. Additionally it does the following:
 // - write the Time into the logfile every minute
 // - calculate powerACin & powerInverter to be in sync with meter power
-// - calculate "leftover" PV power which can not be charged into the battery
-//   and collect it in a ringbuffer
 // - calculate the power which was drained from the battery into a Shelly
 //   device since last Shelly switch change.
-// - also write ACin-power leftover-Power ESS-power and battery/inverter-power
+// - also write ACin-power ESS-power and battery/inverter-power
 //   into the same logfile line
 // - do everything that depends on the current time, like
 //   - hourly consumption / feed-in
@@ -931,12 +990,12 @@ void onNewMeterValue()
 {
   //If one minute is over, add current time + SOC + bat. voltage into logfile
   if (oneMinuteOver) {
-    addToLogfile("\n"+String(battery.soc)+"% "+String(switchMode)+String(essPowerStrategy));
-    addToLogfile("\n"+String(multiplusDcVoltage, 2)+"V");
-    if (chargeEfficiency>=60) addToLogfile("\n"+String(int(round(chargeEfficiency)))+"/"); else addToLogfile("\n--/");
-    if (dischargeEfficiency>=60) addToLogfile(String(int(round(dischargeEfficiency)))+"%"); else addToLogfile("--%");
-    addToLogfile("\n"+String(powerTrend/(60.0*60.0), 1)+"Wh");
-    addToLogfile("\n"+secondsToTimeStr(electricMeter_Runtime+ELECTRIC_METER_TIME_OFFSET,false));
+    addToLogfile("\n\n"+String(battery.soc)+"% "+String(switchMode)+String(essPowerStrategy),1);
+    addToLogfile("\n"+String(multiplusDcVoltage, 2)+"V",1);
+    addToLogfile("\nC/D "+String(int(round(battery.chargeCurrentLimit)))+"/"+String(int(round(battery.dischargeCurrentLimit))),1);
+    addToLogfile("\nW1/W2/R "+String(battery.warningFlags1,HEX)+"/"+String(battery.warningFlags2,HEX)+"/"+String(battery.requestFlags,HEX),1);
+    addToLogfile("\n"+String(powerTrendConsumption, 1)+"/"+String(powerTrendFeedIn, 1)+"Wh",1);
+    addToLogfile("\n"+secondsToTimeStr(electricMeter_Runtime+ELECTRIC_METER_TIME_OFFSET,false),1);
   }
   //If new power meter value came in, write it to logfile first:
   if (newMeterValue)  //It might take up to one minute or longer for a new meter value to come in!
@@ -961,17 +1020,15 @@ void onNewMeterValue()
     p += pInverterRingBuf[(ptr_pInverterRingBuf -10)&(SIZE_P_INVERTER_RINGBUF-1)];
     p += pInverterRingBuf[(ptr_pInverterRingBuf -11)&(SIZE_P_INVERTER_RINGBUF-1)];
     powerInverter = round (p / 7);    //pos = battery is charged, neg = battery is discharged/drained
-    //Calculate the power to compensate from summed meter power plus current Multiplus feed-in-power on ACin (powerACin)
+    //Calculate the power to compensate from summed meter power plus Multiplus feed-in-power on ACin
     estTargetPower = round(powerACin + POWER_CAL*decisiveMeterPower -gridSetpoint);
-    //Calculate powerLeftover = truely excess PV power, which is NOT coming (partly) from battery
-    if (powerInverter > 0) powerLeftover = gridSetpoint - round(POWER_CAL*decisiveMeterPower); else powerLeftover = gridSetpoint - round(POWER_CAL*decisiveMeterPower - powerInverter);
-    //DEBUG: powerLeftover = powerLeftover + 1800; //FAKE SOME PV POWER FOR DEBUG ONLY!
     //Write into logfile:
-    if (decisiveMeterPower>0) addToLogfile("\n+"+String(decisiveMeterPower));
-     else addToLogfile("\n"+String(decisiveMeterPower));              //pos = consumption from grid,  neg = feed into grid
-    addToLogfile(" "+String(powerACin));                              //pos = feed into meter,        neg = consume from meter
-    addToLogfile(" "+String(estTargetPower));                         //pos = feed into meter,        neg = consume from meter
-    addToLogfile(" "+String(powerLeftover));                          //pos = excess power,           neg = consumption from battery or grid
+    if (decisiveMeterPower < 0) addToLogfile("\n"+String(decisiveMeterPower),1);    //pos = consumption from grid,  neg = feed into grid
+     else addToLogfile("\n+"+String(decisiveMeterPower),1);
+    if (powerACin < 0) addToLogfile(String(powerACin),1);                           //pos = feed into meter,        neg = consume from meter
+     else addToLogfile("+"+String(powerACin),1);
+    if (estTargetPower < 0) addToLogfile(String(estTargetPower),1);                 //pos = feed into meter,        neg = consume from meter
+     else addToLogfile("+"+String(estTargetPower),1);
     //If we can update the ESS power immediately, we do that:
     if      (essPowerStrategy == 5) essPowerTmp = estTargetPower;                       //Immediate strategy
     else if (essPowerStrategy == 7) essPowerTmp = max(estTargetPower, essPowerTmp);     //Maximum strategy
@@ -981,9 +1038,9 @@ void onNewMeterValue()
   if (oneSecondOver)
   {
     //write latest value into ringbuffer
-    ptrPowerRingBuf++;
-    if (ptrPowerRingBuf > (SIZE_PWR_RINGBUF-1)) ptrPowerRingBuf = 0;  //wrap pointer if needed
     estTargetPowerRingBuf[ptrPowerRingBuf] = estTargetPower;
+    ptrPowerRingBuf++;
+    if (ptrPowerRingBuf >= SIZE_PWR_RINGBUF) ptrPowerRingBuf = 0;  //wrap pointer if needed
     //Now evaluate all values in the ringbuffer based on the update strategy -> Find max and min value of current ringbuffer
     int16_t min = +30000;
     int16_t max = -30000;
@@ -997,145 +1054,155 @@ void onNewMeterValue()
     //Every second, update depending on strategy
     if      (essPowerStrategy == 7) essPowerTmp = max;            //Maximum strategy
     else if (essPowerStrategy == 3) essPowerTmp = min;            //Minimum strategy
-    else if (essPowerStrategy == 0) essPowerTmp = 0;              //0W strategy (compensate ACout2 only)
-    //collect Battery drained power into powerBatteryToShellySum and saturate
-    if (powerLeftover<0) powerBatteryToShellySum += -powerLeftover;  //only collect all (negative) power we sink from battery into powerBatteryToShellySum (positive)
-    if (powerBatteryToShellySum > POWER_BATTERY_TO_SHELLY_SUM_MAX) powerBatteryToShellySum = POWER_BATTERY_TO_SHELLY_SUM_MAX;   //saturate maximum power spent (negative)
-    //collect powerLeftover in Ringbuffer
-    ptr_pLeftoverRingBuf++;
-    if (ptr_pLeftoverRingBuf >= SIZE_P_LEFTOVER_RINGBUF) ptr_pLeftoverRingBuf = 0;  //wrap pointer if needed
-    pLeftoverRingBuf[ptr_pLeftoverRingBuf] = powerLeftover;
-    //Store latest meter power into ringbuffer for automatic mode switching
-    if ((masterMultiLED_SwitchRegister&0x30)==0x30) {  //in Charger+Inverter mode:
-      pMeterRingBuf[ptr_pMeterRingBuf] = decisiveMeterPower;
-      ptr_pMeterRingBuf++;
-      if (ptr_pMeterRingBuf >= SIZE_P_METER_RINGBUF) ptr_pMeterRingBuf = 0;  //wrap pointer if needed
-      //Calculate consumption trend by summing over the complete ringbuffer
-      powerTrend = 0;
-      for (int i=0; i<SIZE_P_METER_RINGBUF; i++) if (pMeterRingBuf[i] > 0) powerTrend += pMeterRingBuf[i];      
+    else if (essPowerStrategy == 0) essPowerTmp = 0;              //0W strategy (compensate ACout1 only)
+    //collect charger/inverter AC power into ringbuffer
+    powerChargerRingBuf[ptr_powerChargerRingBuf] = multiplusPinverterFiltered;
+    ptr_powerChargerRingBuf++;
+    if (ptr_powerChargerRingBuf >= SIZE_SHELLY_POWER_RINGBUFFERS) ptr_powerChargerRingBuf = 0;  //wrap pointer if needed
+    //calculate average charger/inverter AC power over complete ringbuffer
+    averageChargingPower = 0;
+    for (int i=0; i<SIZE_SHELLY_POWER_RINGBUFFERS; i++) {
+      averageChargingPower += powerChargerRingBuf[i];    //equally average charger+inverter power
     }
-    else {  //in ChargerOnly mode:
-      for (int i=0; i<SIZE_P_METER_RINGBUF; i++) pMeterRingBuf[i] = 0;  //clear Buffer
-      powerTrend = 0;
-      automaticMaximumModeCnt = 0;  //Turn timer off
+    averageChargingPower = averageChargingPower / SIZE_SHELLY_POWER_RINGBUFFERS;   //integer division is precise enough
+    //collect difference between Pmains(ACin) and desired ESS power into ringbuffer
+    powerControlDeviationRingBuf[ptr_powerControlDeviationRingBuf] = multiplusPmainsFiltered - multiplusESSpower;
+    ptr_powerControlDeviationRingBuf++;
+    if (ptr_powerControlDeviationRingBuf >= SIZE_SHELLY_POWER_RINGBUFFERS) ptr_powerControlDeviationRingBuf = 0;  //wrap pointer if needed
+    //calculate average control deviation power over complete ringbuffer
+    averageControlDeviationFeedIn = 0;
+    for (int i=0; i<SIZE_SHELLY_POWER_RINGBUFFERS; i++) {
+      if (powerControlDeviationRingBuf[i]>0) averageControlDeviationFeedIn += powerControlDeviationRingBuf[i]; //only accumulate positive (feed-in) deviations
     }
+    averageControlDeviationFeedIn = averageControlDeviationFeedIn / SIZE_SHELLY_POWER_RINGBUFFERS;   //integer division is precise enough
+    //Ring buffer of power meter values, to obtain minimum feed-in over last Shelly switching period
+    powerMeterRingBuf[ptr_powerMeterRingBuf] = decisiveMeterPower;
+    ptr_powerMeterRingBuf++;
+    if (ptr_powerMeterRingBuf >= SIZE_SHELLY_POWER_RINGBUFFERS) ptr_powerMeterRingBuf = 0;  //wrap pointer if needed
+    //obtain minimum feed-in over complete ringbuffer
+    minimumFeedIn = 9999999;  //initialize with unreachable high power
+    for (int i=0; i<SIZE_SHELLY_POWER_RINGBUFFERS; i++) {
+      if ((-powerMeterRingBuf[i]) < minimumFeedIn) minimumFeedIn = (-powerMeterRingBuf[i]); //search minimum of inverted power meter values (feed-in)
+    }
+    //Store latest meter power into ringbuffer for automatic mode switching (15min powerTrend calculation)
+    //we use a seperate ringbuffer for this, as powerTrend ringbuffer needs to be cleared after every mode switch
+    powerTrendRingBuf[ptr_powerTrendRingBuf] = decisiveMeterPower;
+    ptr_powerTrendRingBuf++;
+    if (ptr_powerTrendRingBuf >= SIZE_POWER_TREND_RINGBUF) ptr_powerTrendRingBuf = 0;  //wrap pointer if needed
+    //Calculate consumption trend by summing over the complete ringbuffer
+    int32_t cons = 0;
+    int32_t feed = 0;
+    for (int i=0; i<SIZE_POWER_TREND_RINGBUF; i++) {
+      if (powerTrendRingBuf[i] > 0) cons += powerTrendRingBuf[i];  //only include power consumed from grid
+      if (powerTrendRingBuf[i] < 0) feed -= powerTrendRingBuf[i];  //only include (negative) power fed into grid
+    }
+    powerTrendConsumption = cons / (60.0*60.0);
+    powerTrendFeedIn      = feed / (60.0*60.0);
   }
   //In case ESS power would be negative, check if charging from ACin is allowed
   if (!chargeFromACin && (essPowerTmp < 0)) essPowerTmp = 0;
+  //Estimate expected battery charge power with current essPowerTmp
+  int chargePower = multiplusPmainsFiltered + multiplusPinverterFiltered - essPowerTmp;           //Note: Calculating with battery.power instead of multiplusPinverterFiltered is unstable.
+  //Constant charge mode
+  if (switchMode=='C') {
+    if (chargePower < CONSTANT_CHARGE_POWER) {
+      essPowerTmp2 = multiplusPmainsFiltered + multiplusPinverterFiltered - CONSTANT_CHARGE_POWER;   //Charge at least with CONSTANT_CHARGE_POWER (minus Multiplus standby power) or more if PV is available
+    }
+  }
+  else if (chargeOnly && (chargePower < TRICKLE_CHARGE_POWER)) { //Normal mode during charge-only due to low battery
+    essPowerTmp2 = multiplusPmainsFiltered + multiplusPinverterFiltered - TRICKLE_CHARGE_POWER;   //Charge at least with low compensation power (minus Multiplus standby power) or more if PV is available
+  }
+  else essPowerTmp2 = essPowerTmp;  //Normal compensation; Or we are charging >TRICKLE_CHARGE_POWER anyway
   //Check if ESS power value needs to be updated or was not re-written into Multiplus for more than 10 seconds (avoid timeout)
-  if ((veCmdSendState==0) && ((essPowerTmp != essPowerDesired) || (essTimeoutCounter <= 0))) applyNewEssPower(essPowerTmp);
+  if ((veCmdSendState==0) && ((essPowerTmp2 != essPowerDesired) || (essTimeoutCounter <= 0))) applyNewEssPower(essPowerTmp2);
 }
 
 
 bool switchShelly(String shellyIP, bool turnOn)
 {
-  if (shellyWaitCnt <= 0) {   //last safety check, if we waited long enough
-    String command = "http://" + shellyIP + "/relay/0?turn=";
-    if (turnOn) command += "on"; else command += "off";
-    HTTPClient http;
-    http.setConnectTimeout(600);        //in ms, influences if command reaches Shelly at all (must be at least 400ms)
-    http.setTimeout(200);               //in ms, influences if we receive successful response from Shelly (must be at least 150ms)
-    http.begin(command.c_str());
-    int httpResponseCode = http.GET();  //HTTP response code != 200 means error
-    http.end();
-    if (minuteTimer < 10) addToLogfile("\n "+String(minuteTimer)); else addToLogfile("\n"+String(minuteTimer));
-    if (httpResponseCode == 200) {
-      if  (turnOn) addToLogfile(" "+shellyIP+"=on"); else addToLogfile(" "+shellyIP+"=off");
-      return true;
-    } else {
-      if  (turnOn) addToLogfile(" "+shellyIP+"=FAIL(on)"); else addToLogfile(" "+shellyIP+"=FAIL(off)");
-      return false;
-    }
+  String command = "http://" + shellyIP + "/relay/0?turn=";
+  if (turnOn) command += "on"; else command += "off";
+  HTTPClient http;
+  http.setConnectTimeout(600);        //in ms, influences if command reaches Shelly at all (must be at least 400ms)
+  http.setTimeout(200);               //in ms, influences if we receive successful response from Shelly (must be at least 150ms)
+  http.begin(command.c_str());
+  int httpResponseCode = http.GET();  //HTTP response code != 200 means error
+  http.end();
+  if (minuteTimer < 10) addToLogfile("\n "+String(minuteTimer),1); else addToLogfile("\n"+String(minuteTimer),1);
+  if (httpResponseCode == 200) {
+    if  (turnOn) addToLogfile(" "+shellyIP+"=on",1); else addToLogfile(" "+shellyIP+"=off",1);
+    return true;
+  } else {
+    if  (turnOn) addToLogfile(" "+shellyIP+"=FAIL(on)",1); else addToLogfile(" "+shellyIP+"=FAIL(off)",1);
+    return false;
   }
 }
 
 
-int switchShellys(int state) //returns the number of failed actuations (0=all success)
+void controlConsumerShellys()
 {
-  int fails = 0;
-  uint8_t bits = 0;
-  if (state >= 0) { //The positive states with all PV on and switching consumers
-    //first consumer states (positive)
-    bits = CONSUMER_SETTINGS[state];
-    for (int i=0; i<NR_CONSUMER_IP; i++) {      //for each bit/consumer:
-      if (!switchShelly(CONSUMER_IP[i], bits & (1 << i))) fails++;
+  if ((shellyWaitCnt <= 0) && (WiFi.status() == WL_CONNECTED)) {   //Only try switching if waiting time is over and if WIFI is available
+    //Already set new default waiting time
+    shellyWaitCnt = CONSUMER_SHELLY_SWITCHING_INTERVAL*CPS;  //Set the minimum waiting time
+    //write average current into logfile
+    addToLogfile("\nChg"+String(averageChargingPower)+" avgFd"+String(averageControlDeviationFeedIn)+" minFd"+String(minimumFeedIn),1);
+    if ((chargeOnly) || (multiplusEmergencyPowerStatus==0x02)) {   //If multiplus is in charge-only mode due to low battery, in emergency power mode:
+      shellyState = 0;     //fix to: all PV ON, all consumers OFF
     }
-    //then generator states (negative)
-    bits = GENERATOR_SETTINGS[0];
-    for (int i=0; i<NR_GENERATOR_IP; i++) {      //for each bit/generator:
-      if (!switchShelly(GENERATOR_IP[i], bits & (1 << i))) fails++;
+    else {
+      //check if shellyState should be increased (one more consumer Shelly ON)
+      if (minimumFeedIn > POWER_TH_SHELLY_PLUS) shellyState++;
+      //check if shellyState should be decreased (one more Consumer Shelly OFF)
+      else if (minimumFeedIn < POWER_TH_SHELLY_MINUS) shellyState--;
     }
-  }
-  else { //The negative states with all consumers on and switching PV generators
-    //first consumer states (positive)
-    bits = CONSUMER_SETTINGS[0];
-    for (int i=0; i<NR_CONSUMER_IP; i++) {      //for each bit/consumer:
-      if (!switchShelly(CONSUMER_IP[i], bits & (1 << i))) fails++;
+    //saturate state at min and max
+    if (shellyState < 0) shellyState = 0;
+    if (shellyState > N_CONSUMER_SHELLYS) shellyState = N_CONSUMER_SHELLYS;
+    //write latest Shelly-state into logfile
+    addToLogfile(" Shelly:"+String(shellyState),1);
+    //switch consumer Shellys
+    int8_t  shellyStateConsumerTemp[N_CONSUMER_SHELLYS];
+    for (int i=0; i<N_CONSUMER_SHELLYS; i++) {      //For each consumer Shelly do:
+      bool turnOn = (i < shellyState);  //state = 0 = all consumers OFF ; 1 = 1st consumer ON, rest OFF ; 2 = 1st+2nd consumer ON, rest OFF ...
+      if (turnOn) shellyStateConsumerTemp[i] = 1; else shellyStateConsumerTemp[i] = -1;
     }
-    //then generator states (negative)
-    bits = GENERATOR_SETTINGS[-state];
-    for (int i=0; i<NR_GENERATOR_IP; i++) {      //for each bit/generator:
-      if (!switchShelly(GENERATOR_IP[i], bits & (1 << i))) fails++;
-    }
-  }
-  return fails;
-}
-
-
-void shellyControl()
-{
-  //Shelly switching is only done if connected to Wifi
-  if ((shellyWaitCnt <= 0) && (WiFi.status() == WL_CONNECTED)) {
-    //Find max and min values of current ringbuffer
-    int16_t minLeftover = +30000;      //pos = feed-in, neg = consumption
-    int16_t maxLeftover = -30000;      //pos = feed-in, neg = consumption
-    for (int i=0; i<SIZE_P_LEFTOVER_RINGBUF; i++) {
-      int16_t pwr = pLeftoverRingBuf[i];
-      if (pwr < minLeftover) minLeftover = pwr;
-      if (pwr > maxLeftover) maxLeftover = pwr;
-    }
-    //If Shellys were not initialized yet:
-    if (!shellysInitialized) {
-      shellyState = 0;
-      shellyFails += switchShellys(shellyState); //On purpose we don't check if a Shelly is actually available or has really been switched
-      shellyActuations++;
-      shellyWaitCnt = 9*60*CPS;   //After init, wait 9min for all PV to raise and also to avoid problems with re-starting compressor motors
-      powerBatteryToShellySum = 0;     //reset energy counter
-      shellysInitialized = true;
-    }
-    //If we have at least 200W left over for (SIZE_P_LEFTOVER_RINGBUF) seconds, decrease shellyState (enable more consumers or disable more PV)
-    else if ((minLeftover > 200) && (shellyState > (-(NR_GENERATOR_SETTINGS-1)))) {
-      shellyState--;
-      shellyFails += switchShellys(shellyState); //On purpose we don't check if a Shelly is actually available or has really been switched
-      shellyActuations++;
-      if (shellyState >= 0) shellyWaitCnt = 180*CPS;  //as consumers were switched, we have to wait at least 3min to avoid problems with re-starting compressor motors
-      else                  shellyWaitCnt = 30*CPS;   //as only PV is turned off, we don't need to wait longer than 30 seconds
-      powerBatteryToShellySum = 0;     //reset energy counter
-    }
-    //Now the cases where we try making more power avalable (increase shellyState):
-    //if even the highest leftover is already below 0W, increase shellyState, but only if we already spent the minimum amount of power
-    else if ((maxLeftover < 0) && (powerBatteryToShellySum > POWER_BATTERY_TO_SHELLY_THRESHOLD) && (shellyState < (NR_CONSUMER_SETTINGS-1))) {
-      shellyState++;
-      shellyFails += switchShellys(shellyState);     //On purpose we don't check if a Shelly is actually available or has really been switched
-      shellyActuations++;
-      if (shellyState > 0) {
-        shellyWaitCnt = 180*CPS;      //as consumers were switched, we have to wait at least 3min to avoid problems with re-starting compressor motors
-        //We don't reset energy counter, as in case it's required to step up two states, we don't want to spend the energy two times.
-      } else {
-        shellyWaitCnt = 9*60*CPS;     //we enabled more PV and have to wait 9 minutes for the inverters to reach 100%
-        //We don't reset energy counter, as in case it's required to step up two states, we don't want to spend the energy two times.
+    //Additionally apply consumer rules defined in CONSUMER_RULES[]:
+    if (timeIsValid) {
+      int h = 0;
+      int m = 0;
+      int s = 0;
+      secondsToTime(h, m, s, electricMeter_Runtime+ELECTRIC_METER_TIME_OFFSET);
+      //Go through all of the rules and only turn ON if rule is met
+      nrShellysEnabledByRule = 0;
+      if (switchMode == 'A') {     //Only apply rules in full automatic mode, don't apply in 'S' or other modes
+        for(auto rule: CONSUMER_RULES) {   //Check all the rules
+          if ( ((h > rule.hourOn) || ((h == rule.hourOn) && (m >= rule.minOn))) &&
+              ((h < rule.hourOff) || ((h == rule.hourOff) && (m <= rule.minOff))) &&
+              (battery.soc >= rule.batteryThr + socInverterOnOff) &&                //rule threshold goes on-top of adaptive inverter-On/Off-threshold
+              ((rule.startedChg==false) || (rule.startedChg & batteryStartedCharging)) )
+          {
+            shellyStateConsumerTemp[rule.shellyNr] = 1;   //Conditions met, the Shelly belonging to this rule can be turned on
+            nrShellysEnabledByRule++;
+          }
+        }
       }
     }
-    //if at least one PV is currently disabled and if the highest leftover is below 100W, and the battery is not fully charged yet
-    else if ((shellyState < 0) && (maxLeftover < 100) && (battery.soc < 96) && (shellyState < (NR_CONSUMER_SETTINGS-1))) {
-      shellyState++;
-      shellyFails += switchShellys(shellyState);   //On purpose we don't check if a Shelly is actually available or has really been switched
-      shellyActuations++;
-      shellyWaitCnt = 9*60*CPS;     //we enabled more PV and have to wait 9 minutes for the inverters to reach 100%
-      powerBatteryToShellySum = 0;  //reset energy counter
+    //Try to apply consumer Shelly states in case they changed
+    for(int shelly=0; shelly<N_CONSUMER_SHELLYS; shelly++) {
+      if (shellyStateConsumerTemp[shelly] != shellyConsumer[shelly]) {   //if Shelly state is different:
+        if (shellyStateConsumerTemp[shelly] == 1) {
+          shellyActuations++;
+          if (switchShelly(CONSUMER_IP[shelly], true)) shellyConsumer[shelly] = 1; else shellyFails++;   //only mark Shelly as turned on when we got successful response
+        }
+        else if (shellyStateConsumerTemp[shelly] == -1) {
+          shellyActuations++;
+          if (switchShelly(CONSUMER_IP[shelly], false)) shellyConsumer[shelly] = -1; else shellyFails++; //only mark Shelly as turned off when we got successful response
+        }
+      }
     }
   }
 }
+
 
 
 //true if frame was known, false if unknown
@@ -1180,25 +1247,16 @@ bool decodeBatteryCanMessage(twai_message_t message)
         battery.voltage = temp*0.01;
         temp = (message.data[3]<<8) + message.data[2];
         battery.current = temp*0.1;
+        battery.power = round(battery.voltage * battery.current);
         if (battery.current < batteryCurrentMin) batteryCurrentMin = battery.current;
         if (battery.current > batteryCurrentMax) batteryCurrentMax = battery.current;
-        float p = battery.current * battery.voltage;
-        if (p < batteryPowerMin) batteryPowerMin = p;
-        if (p > batteryPowerMax) batteryPowerMax = p;
+        if (battery.power < batteryPowerMin) batteryPowerMin = battery.power;
+        if (battery.power > batteryPowerMax) batteryPowerMax = battery.power;
+        bmsPowerAverage = (1-alpha)*bmsPowerAverage + alpha*battery.power;
         temp = (message.data[5]<<8) + message.data[4];
         battery.temperature = temp*0.1;
         if (battery.temperature < batteryTempMin) batteryTempMin = battery.temperature;
         if (battery.temperature > batteryTempMax) batteryTempMax = battery.temperature;
-        //average charge/discharge efficiency
-        int16_t powerBattery = round(battery.current*battery.voltage);
-        if ((powerBattery > 0) && (powerInverter > 0)) {
-          float cE = 100.0*powerBattery/powerInverter;
-          if ((cE > 60) && (cE < 100)) chargeEfficiency = (1-alpha)*chargeEfficiency + alpha*cE;
-        }
-        else if ((powerBattery < 0) && (powerInverter < 0)) {
-          float dE = 100.0*powerInverter/powerBattery;
-          if ((dE > 60) && (dE < 100)) dischargeEfficiency = (1-alpha)*dischargeEfficiency + alpha*dE;
-        }
         //update DC voltage calibration offset whenever DC current is < 1.5A
         if ((abs(battery.current)<1.5) && (abs(multiplusDcCurrent)<1.5)) {
           multiplusDcVoltageCalibration = (1-beta)*multiplusDcVoltageCalibration + beta*(battery.voltage-multiplusDcVoltage);
@@ -1242,15 +1300,11 @@ bool decodeBatteryCanMessage(twai_message_t message)
           battery.socMin = battery.soc;
           battery.socMinTime = electricMeter_Runtime;
         }
+        if (battery.soc >= battery.socMin + BATTERY_STARTED_CHARING_OFFSET) batteryStartedCharging = true;
+        if ((battery.soc >= 95) && (battery.soc <= 100)) batteryStartedCharging = true;                     //If battery reached 95%, also set batteryStartedCharging flag, to avoid that (socMin + BATTERY_STARTED_CHARING_OFFSET) is unreachable
         if (battery.soc > battery.socMax) {
           battery.socMax = battery.soc;
           battery.socMaxTime = electricMeter_Runtime;
-        }
-        //Stop writing logfile soon, in case battery reached low critical state for whatever reason
-        if (!stopWritingLogfile && (battery.soc <= SOC_LIMIT_LOWEST)) {
-          stopWritingLogfile = true;               //the end of logging is near..
-          logfileCounterStop = logfileCounter + LOGFILE_SIZE/2;  //still allow half the buffer to be overwritten with log entries
-          addToLogfile("\n"+String(minuteTimer)+" LOGGING END due to SOC = "+String(battery.soc)+"%");
         }
         socWatchdog = SOC_WATCHDOG_CYCLES;  //reset watchdog timer
         battery.soh =  (message.data[3]<<8) + message.data[2];        //State Of Health
@@ -1297,8 +1351,8 @@ void batteryHandling()
     while (twai_receive(&message, 0) == ESP_OK) {
       if (!decodeBatteryCanMessage(message)) {
         //If message is unknown, write it to logfile
-        addToLogfile("\n0x"+String(message.identifier,HEX));
-        for (int i = 0; i < message.data_length_code; i++) addToLogfile(" "+String(message.data[i],HEX));
+        addToLogfile("\n0x"+String(message.identifier,HEX),3);
+        for (int i = 0; i < message.data_length_code; i++) addToLogfile(" "+String(message.data[i],HEX),3);
       }
     }
   }
@@ -1306,8 +1360,12 @@ void batteryHandling()
   if ((battery.soc >= 0) && (socWatchdog <= 0))
   {
     battery.soc = -1;                 //set SOC negative, to indicate that it is invalid
-    addToLogfile("\n"+String(minuteTimer)+" Battery CAN bus FAIL");
+    addToLogfile("\n"+String(minuteTimer)+" Battery CAN bus FAIL",3);
   }
+  //Calculate pulse rate for external Shelly 1PM from battery SOC
+  shelly1PMpulsewidth = round(1.749*CPS/battery.soc);             //17490 = 1%/W with CPS=10000Hz
+  if (shelly1PMpulsewidth < 173) shelly1PMpulsewidth = 173;       //limit to max. 101 %/W
+  if (shelly1PMpulsewidth > 10*CPS) shelly1PMpulsewidth = 10*CPS; //limit to min. 0.17 %/W = 10 seconds max pulse width
 }
 
 
@@ -1457,10 +1515,16 @@ void checkSMLpowerMeter()
         char searchString1[] = {0x77,0x07,0x01,0x00,0x01,0x08,0x00,0xFF};
         pos = searchSMLentry(sBuf2, searchString1, sizeof(searchString1), 0, smlLength-1);
         if (pos >= 0) {
-          readSMLentry(sBuf2, smlLength, pos, 1, 1, electricMeter_Status180, 3);
+          int nrStatusBytes = readSMLentry(sBuf2, smlLength, pos, 1, 1, electricMeter_Status180, MAX_METER_STATUS_BYTES);
+          //Move every character to right (if needed)
+          for (int i=(MAX_METER_STATUS_BYTES-1); i>=(MAX_METER_STATUS_BYTES-nrStatusBytes); i--) {
+            electricMeter_Status180[i] = electricMeter_Status180[i-(MAX_METER_STATUS_BYTES-nrStatusBytes)];
+          }
+          //Fill unused status characters on the left with zeros (if needed)
+          for (int i=0; i<(MAX_METER_STATUS_BYTES-nrStatusBytes); i++) electricMeter_Status180[i] = 0;
           //Count power signs for combination with impulse power measurement (0x8x = consumption; 0xAx = feed-in)
-          if ((electricMeter_Status180[2] & 0xF0) == 0x80) electricMeterSignPositive++;
-          else if ((electricMeter_Status180[2] & 0xF0) == 0xA0) electricMeterSignNegative++;
+          if ((electricMeter_Status180[MAX_METER_STATUS_BYTES-1] & 0xF0) == 0x80) electricMeterSignPositive++;
+          else if ((electricMeter_Status180[MAX_METER_STATUS_BYTES-1] & 0xF0) == 0xA0) electricMeterSignNegative++;
           //Continue decoding with consumption counter
           if (readSMLentry(sBuf2, smlLength, pos, 1, 4, temp, 1) == 1) {          //Scaling factor 1.8.0
             scaler = temp[0];
@@ -1483,7 +1547,6 @@ void checkSMLpowerMeter()
         char searchString2[] = {0x77,0x07,0x01,0x00,0x02,0x08,0x00,0xFF};
         pos = searchSMLentry(sBuf2, searchString2, sizeof(searchString2), 0, smlLength-1);
         if (pos >= 0) {
-          readSMLentry(sBuf2, smlLength, pos, 1, 1, electricMeter_Status280, 3);
           if (readSMLentry(sBuf2, smlLength, pos, 1, 4, temp, 1) == 1) {          //Scaling factor 2.8.0
             scaler = temp[0];
             int len = readSMLentry(sBuf2, smlLength, pos, 1, 5, temp, 8);            //Consumption 2.8.0
@@ -1522,7 +1585,7 @@ void checkSMLpowerMeter()
             if (len == 4) {
               int32_t p32 = (temp[0]<<24) + (temp[1]<<16) + (temp[2]<<8) + temp[3];
               electricMeter_Power = p32 * pow(10,scaler);
-              //if ((electricMeter_Status180[2] & 0xF0) == 0xA0) electricMeter_Power = -electricMeter_Power;  //not needed as my meter already gives a signed value
+              //if ((electricMeter_Status180[MAX_METER_STATUS_BYTES-1] & 0xF0) == 0xA0) electricMeter_Power = -electricMeter_Power;  //not needed as my meter already gives a signed value
               //also update the integer values
               newDigitalMeterPower = true;  //indicate that we got a new digital meter power from Info-DSS output
             }
@@ -1570,43 +1633,67 @@ void checkSMLpowerMeter()
       }
       else {  //If CRC was wrong:
         electricMeterCRCwrong++;
-        addToLogfile("\nWrong SML CRC: "+String(calculatedCRC,HEX)+" ("+String(smlLength)+"byte)");
+        addToLogfile("\nWrong SML CRC: "+String(calculatedCRC,HEX)+" ("+String(smlLength)+"byte)",1);
         //addFrameToLogfile(sBuf2,0,smlLength-1);
       }
     }
   }
 }
 
-void automaticChargerOnlySwitching()
+
+void automaticSwitching()
 {
   //Decide on the ESS power update strategy
-  if (multiplusEmergencyPowerStatus==0x02) essPowerStrategy = 0;  //If we are off-grid, use 0W strategy (as there is nothing to compensate on AC-in)
-  else if (switchMode=='A') {
-    if (((masterMultiLED_SwitchRegister&0x30)==0x30) && (powerTrend >= POWER_TREND_TH)) {  //if we are in Charger+Inverter mode and powerTrend>Threshold
-      essPowerStrategy = 7;                                       //Maximum mode
-      automaticMaximumModeCnt = AUTOMATIC_MAXIMUM_MODE_DURATION;  //reset Timer
-    }
-    else if (((masterMultiLED_SwitchRegister&0x30)==0x30) && (automaticMaximumModeCnt > 0)) { //if we are in Charger+Inverter mode and Timer still running
-      essPowerStrategy = 7;   //Maximum mode
-    }
-    else essPowerStrategy = ESS_STRATEGY_DEFAULT;                 //otherwise use default strategy in automatic program
+  if ((multiplusEmergencyPowerStatus==0x02) || (switchMode=='Z')) {  //If we are off-grid or in 'Z' = Zero-switchMode:
+    essPowerStrategy = 0;         //use 0W strategy (as there is nothing to compensate on AC-in)
+    automaticMinMaxModeCnt = 0;   //exit Min/Max strategy mode in case we were in
+    IRpinDisplay = HIGH;          //Turn red LED on to indicate abnormal situation
   }
-  else essPowerStrategy = essStrategySelected;                    //otherwise constantly use the selected strategy
-  //Check if the working mode of the Multiplus needs to be changed for some reason.
-  if (veCmdSendState == 0) {
-    if (multiplusEmergencyPowerStatus==0x02) {  //If we are off-grid (mains=off), force Charger+Inverter mode
-      if ((masterMultiLED_SwitchRegister & 0x30) != 0x30) veCmdSendState = 0x07;   //If not in Inverter+Charger mode, force switching to it
+  // else if (chargeOnly) {  //If we are in charge-only mode due to low battery:
+  //   essPowerStrategy = 3;         //Use minimum strategy, because we don't want to waste energy for feeding-in. And if PV is dropping due to shadows, charging a few more seconds from grid does not harm.
+  //   automaticMinMaxModeCnt = 0;   //exit Min/Max strategy mode in case we are in
+  // }
+  else
+  { //we are on-grid, then use automatic strategy:
+    if ((automaticMinMaxModeCnt <= 0) && (essPowerStrategy != 5)) {  //if Max/Min duration is over, but we didn't switch back to immedate strategy yet:
+      //reset power Trend and calculation buffer
+      for (int i=0; i<SIZE_POWER_TREND_RINGBUF; i++) powerTrendRingBuf[i] = 0;  //clear Buffer
+      powerTrendConsumption = 0;
+      powerTrendFeedIn = 0;
+      //switch back to immediate strategy
+      essPowerStrategy = 5;
     }
-    else if (switchMode=='C') {                 //ChargeOnly mode is forced
-      if ((masterMultiLED_SwitchRegister & 0x30) != 0x10) veCmdSendState = 0x05;   //If not in charger-only mode, force switching to it
+    else if (automaticMinMaxModeCnt <= 0) {   //if we are currently in normal immediate compensation mode (NOT in Min/Max)
+      if ((powerTrendConsumption >= POWER_TREND_TH) && (powerTrendFeedIn >= POWER_TREND_TH)) {   //if both 15min grid-consumption and feed-in are above threshold (poor compensation detected)
+        automaticMinMaxModeCnt = AUTOMATIC_MAXIMUM_MODE_DURATION;   //set Timer; use different strategy for some time
+        essPowerStrategy = 7;                                       //switch to default alternative strategy, which is Maximum
+        addToLogfile("\nMin/Max mode start: cons="+String(powerTrendConsumption,1)+" feed="+String(powerTrendFeedIn,1),3);
+      }
     }
-    else if (switchMode=='E') {                 //Charger+Inverter mode is forced, independent of battery level
-      if ((masterMultiLED_SwitchRegister & 0x30) != 0x30) veCmdSendState = 0x07;   //If not in Inverter+Charger mode, force switching to it
+  }
+  //Check if Minimum compensation strategy should be selected instead of Maximum
+  if (automaticMinMaxModeCnt > 0) {   //if we are in Min/Max strategy duration
+    if (battery.soc < (socInverterOnOff+SOC_TH_STRATEGY_OFFSET)) {
+      essPowerStrategy = 3;  //Minimum Strategy saves battery, but also results in the battery slightly charged from the grid during sunlight fluctuations
     }
-    else {  //if we are not in any special force-mode:
-      if ((battery.soc>=0) && (battery.soc < SOC_INVERTER_ON_OFF) && ((masterMultiLED_SwitchRegister&0x30)==0x30)) veCmdSendState = 0x05; //switch to charger-only-mode
-      if ((battery.soc > SOC_INVERTER_ON_OFF) && ((masterMultiLED_SwitchRegister&0x30)==0x10)) veCmdSendState = 0x07;            //switch to charger+inverter mode
-    }
+    else essPowerStrategy = 7;  //use Maximum Strategy to minimize grid consumption
+  }
+  //Adaptive SOC inverter ON/OFF threshold. Check if battery max threshold reached 99..100%. If yes, battery is successfully balanced again and we can allow lowest discharge again:
+  if ((battery.socMax == 99) || (battery.socMax == 100)) socInverterOnOff = SOC_ADAPT_LOWEST;
+  //Check if battery gives Low_voltage (0x04) or BMS_internal (0x08) warnings or alarms, or if max. discharge current is below 150A
+  if ((battery.soc>=0) && (!chargeOnly) && ((battery.warningFlags1 & 0x04) || (battery.protectionFlags1 & 0x04) || (battery.warningFlags2 & 0x08) || (battery.protectionFlags2 & 0x08) || (battery.dischargeCurrentLimit < 79))) {
+    socInverterOnOff = battery.soc + 2; //SOC-limit has to be set to at least +1%, to stop discharging immediately, use +2% to avoid repeated warning after little recharge of battery
+    addToLogfile("\nBatt warn1="+String(battery.warningFlags1,HEX)+" prot1="+String(battery.protectionFlags1,HEX)+" warn2="+String(battery.warningFlags2,HEX)+" prot2="+String(battery.protectionFlags2,HEX)+" Idchg="+String(battery.dischargeCurrentLimit,1)+"A",3);
+    addToLogfile("\nBatt Ubms="+String(battery.voltage,2)+" Ibms="+String(battery.current,1)+" Ump="+String(multiplusDcVoltage,2)+" Imp="+String(multiplusDcCurrent,1),3);
+    addToLogfile("\nBatt th="+String(socInverterOnOff)+"%",3);
+  }
+  //Allow battery discharging or not:
+  if (multiplusEmergencyPowerStatus==0x02) {  //If we are off-grid (mains=off), force Charger+Inverter mode
+    chargeOnly = false;
+  }
+  else {  //if we are not in any special force-mode:
+    if ((battery.soc>=0) && (battery.soc < socInverterOnOff)) chargeOnly = true;   //switch to charger-only-mode
+    if (battery.soc > socInverterOnOff)                       chargeOnly = false;  //switch to charger+inverter mode
   }
   //Do all the time-based stuff
   //This is using the time (seconds) from electric meter. Note that this stops if there is no input from meter or on blackout.
@@ -1655,19 +1742,29 @@ void automaticChargerOnlySwitching()
         dcVoltageMax = multiplusDcVoltage;
         multiplusTempMin = multiplusTemp;
         multiplusTempMax = multiplusTemp;
-        essPowerStrategy7ontime = 0;
+        secondsInMinStrategy = 0;
+        secondsInMaxStrategy = 0;
         batteryTempMin = battery.temperature;
         batteryTempMax = battery.temperature;
         batteryCurrentMin = battery.current;
         batteryCurrentMax = battery.current;
-        batteryPowerMin = battery.current*battery.voltage;
-        batteryPowerMax = battery.current*battery.voltage;
+        batteryPowerMin = battery.power;
+        batteryPowerMax = battery.power;
         shellyActuations = 0;
         shellyFails = 0;
+        batteryStartedCharging = false;
+        addToLogfile("\n",3);
+      }
+      //At exactly 13:00, increase adaptive battery-low threshold
+      if (h==13) {
+        socInverterOnOff += SOC_ADAPT_STEP;         //increase inverter-ON/OFF threshold
+        if (socInverterOnOff > SOC_ADAPT_HIGHEST) socInverterOnOff = SOC_ADAPT_HIGHEST; //don't increase inverter-ON/OFF threshold higher than SOC_ADAPT_HIGHEST
       }
     }
   }
-  if ((oneSecondOver) && (essPowerStrategy==7)) essPowerStrategy7ontime++;
+  //Count seconds we were in Min or Max ESS power update strategy
+  if ((oneSecondOver) && (essPowerStrategy==3)) secondsInMinStrategy++;
+  if ((oneSecondOver) && (essPowerStrategy==7)) secondsInMaxStrategy++;
 }
 
 
@@ -1675,38 +1772,30 @@ void automaticChargerOnlySwitching()
 // ===========================================================================
 //              Switch between modes and strategies using Boot-Button
 // ---------------------------------------------------------------------------
-// Long push changes user mode.
-// Short push changes ESS power update strategy.
+// Long push and Short push are supported.
 // ===========================================================================
 void switchSpecialModes()
 {
-  //Time-limited modes: Check, if we are in such mode and duration is over:
-  if ( (switchMode=='E')  && (specialModeCnt<=0)) {
-    switchMode = SWITCH_MODE_DEFAULT;
-    addToLogfile("\n->UserMode="+String(switchMode)+" by timeout");
-  }
   //React on button-press
   if (buttonPressCnt >= BUTTON_LONGPRESS_TIME) {
-    //LONG PUSH detected (changes Mode)
-    if (switchMode == 'C') switchMode = 'N';        //Normal (use default ESS power update strategy)
-    else if (switchMode == 'N') switchMode = 'A';   //Automatic: High consumption during short time period switches to Maximum for 1 hour
-    else if (switchMode == 'A') switchMode = 'E';   //Extended: Same as Normal mode, but allow discharging battery until empty
-    else if (switchMode == 'E') switchMode = 'C';   //Charger-only mode (inverter always off)
-    specialModeCnt = SWITCH_MODE_DURATION;  //always start timer. If mode automatically ends or not, depends on code above.
-    addToLogfile("\n->UserMode="+String(switchMode));
+    //LONG PUSH detected, code follows here:
+    if (switchMode == 'Z') {
+      switchMode = 'C';                                     //Constant-charge-mode, charges battery with fixed power and float voltage
+      socInverterOnOff = SOC_ADAPT_LOWEST;                  //If we come from 'Z' mode, also reset SOC-low-threshold to lowest
+    }
+    else if (switchMode == 'C') switchMode = 'Z';           //Zero: Same as Save mode, but always use ESSpower = 0W (no charging/compensating power before Multiplus). This mode is required if no meter is available.
+    else if (switchMode != 'C') switchMode = 'C';           //Constant-charge-mode, charges battery with fixed power and float voltage
+    addToLogfile("\n->UserMode="+String(switchMode),3);
+    //end of LONG PUSH code
     buttonPressCnt = -2;                    //reset & lock counter. Don't start it yet if button is not released AND then pressed again
   }
-  boolean bootButton = digitalRead(BUTTON_GPIO);
+  bool bootButton = digitalRead(BUTTON_GPIO);
   if (bootButton == HIGH) {   //If button is not pressed
     if (buttonPressCnt >= BUTTON_DEBOUNCE_TIME) {
-      //SHORT PUSH detected (changes Strategy)
-      if (switchMode != 'A') {  //don't allow changing ESS strategy in automatic program
-        if (essStrategySelected == 7) essStrategySelected = 0;        //0W strategy: Ignore any power on Multiplus ACin or the other two phases, only compensate ACout. Battery will be charged even if power is drawn on L2+L3.
-        else if (essStrategySelected == 0) essStrategySelected = 3;   //Minimum strategy: Use ACin to only compensate the lowest occuring power on L2+L3 within the last 30 seconds, thus ignore short pulses 
-        else if (essStrategySelected == 3) essStrategySelected = 5;   //Immediate strategy: Update ESS-power on ACin immediately every time a new meter value comes in (every second with full SML sensor)
-        else if (essStrategySelected == 5) essStrategySelected = 7;   //Maximum strategy: Use ACin to compensate the highest occuring power on L2+L3 within the last 30 seconds, results in general over-compensation
-        addToLogfile("\n->Strategy="+String(essStrategySelected));
-      }
+      //SHORT PUSH detected, code follows here:
+      if ((switchMode == 'S') || (switchMode == 'C') || (switchMode == 'Z')) switchMode = 'A'; //Automatic: High consumption during short time period switches ESS strategy to Max(7) on Min(3) automatically
+      else if (switchMode == 'A') switchMode = 'S';                                            //Save: Same as Automatic mode, but don't turn-on Shellys based on rules (only turn-on if energy is left over)
+      addToLogfile("\n->UserMode="+String(switchMode),3);
     }
     buttonPressCnt = -1;    //-1 = lock counter. Don't start it yet if button is not pressed.
   }
@@ -1733,120 +1822,99 @@ void updateDisplays()
     //      after line 2 follows line 1
     //      after line 3 follows line 0
   // --- Line 1 ---
-    //Clear last three characters of this line first, to avoid overwriting begin of other line
+    //Clear last three characters of this line. As adding spaces at the end of the line might overwrite into next line.
     lcd.setCursor(17, 0);
     lcd.print("   ");
     //Time
     lcd.setCursor(0, 0);
-    if (timeIsValid) lcd.print(secondsToTimeStr(electricMeter_Runtime+ELECTRIC_METER_TIME_OFFSET,true)); else lcd.print("--:--:--");
+    if (timeIsValid) lcd.print(secondsToTimeStr(electricMeter_Runtime+ELECTRIC_METER_TIME_OFFSET,true));
+    else {
+      lcd.print("--:--");
+      lcd.print(battery.soh);
+      lcd.print("% ");
+    }
     //Wifi + PowerStrategy + SwitchMode
     lcd.setCursor(9, 0);
     if (WiFi.status() == WL_CONNECTED) lcd.print("W"); else lcd.print("-");
     lcd.print(essPowerStrategy);
     lcd.print(switchMode);        //print switchMode number as ASCII character
-    //Multiplus Switch Register
+    //Multiplus Switch Register & Voltage Status
     lcd.setCursor(13, 0);
     lcd.print(masterMultiLED_SwitchRegister,HEX);
-    lcd.print(" ");
-    //Multiplus Voltage Status
-    lcd.setCursor(16, 0);
     lcd.print(multiplusVoltageStatus,HEX);
     lcd.print(" ");
-    //Shelly state number
-    lcd.setCursor(18, 0);
-    if (!shellysInitialized) lcd.print(" ?"); else {
-      if (shellyState>=0) lcd.print(" ");
-      lcd.print(shellyState);
-    }
+    //Shelly state & amount of Shellys turned ON by CONSUMER_RULES[]
+    lcd.setCursor(17, 0);
+    if (shellyState >= 0) lcd.print(" ");
+    lcd.print(shellyState);
+    lcd.print(nrShellysEnabledByRule);
   // --- Line 2 ---
-    //Clear last three characters of this line first, to avoid overwriting begin of other line
+    //Clear last three characters of this line. As adding spaces at the end of the line might overwrite into next line.
     lcd.setCursor(17, 1);
     lcd.print("   ");
     //Battery charge level (SOC)
     lcd.setCursor(0, 1);
     if ((battery.soc >= 0) && (battery.soc <= 100)) lcd.print(battery.soc); else lcd.print("---");
     lcd.print("% ");
-    //Min and Max SOC
-    lcd.setCursor(5, 1);
-    lcd.print("(");
+    //Min and Max SOC and current inverter ON/OFF threshold
+    lcd.setCursor(4, 1);
+    lcd.print(socInverterOnOff);
+    lcd.print(char(0xA3));
     lcd.print(battery.socMin);
     lcd.print(char(0x7E));
     lcd.print(battery.socMax);
-    lcd.print(") ");
+    lcd.print("  ");
     //Battery power
     lcd.setCursor(14, 1);
-    int p = int(round(battery.current*battery.voltage));
-    if (p==0) lcd.print(" ");
-    else if (p>0) lcd.print("+");
-    lcd.print(p);
+    if (battery.power==0) lcd.print(" ");
+    else if (battery.power>0) lcd.print("+");
+    lcd.print(battery.power);
     lcd.print("W");
   // --- Line 3 ---
-    //Clear last three characters of this line first, to avoid overwriting begin of other line
+    //Clear last three characters of this line. As adding spaces at the end of the line might overwrite into next line.
     lcd.setCursor(17, 2);
     lcd.print("   ");
     //Multiplus battery voltage
     lcd.setCursor(0, 2);
     lcd.print(multiplusDcVoltage, 2);
     lcd.print("V");
-    //Temperature, minimum of BMS or Multiplus
+    // //Temperature, minimum of BMS or Multiplus
+    // lcd.setCursor(7, 2);
+    // float t = min(multiplusTemp,battery.temperature);
+    // lcd.print(t,1);
+    // lcd.print(char(0xDF));
+    // lcd.print("C  ");
+    //AC inverter power
     lcd.setCursor(7, 2);
-    float t = min(multiplusTemp,battery.temperature);
-    lcd.print(t,1);
-    lcd.print(char(0xDF));
-    lcd.print("C  ");
+    if (multiplusPinverterFiltered==0) lcd.print(" ");
+    else if (multiplusPinverterFiltered>0) lcd.print("+");
+    lcd.print(multiplusPinverterFiltered);
+    lcd.print("W  ");    
     //ESS power (ACin output power) desired
     lcd.setCursor(14, 2);
     if (multiplusESSpower==0) lcd.print(" ");
     else if (multiplusESSpower>0) lcd.print("+");
     lcd.print(multiplusESSpower);
-    lcd.print("W");
+    if (abs(multiplusESSpower) <= 9999) lcd.print("W"); //Don't print "W" if value is more than 4 digits
   // --- Line 4 ---
-    //Clear last three characters of this line first, to avoid overwriting begin of other line
+    //Clear last three characters of this line. As adding spaces at the end of the line might overwrite into next line.
     lcd.setCursor(17, 3);
     lcd.print("   ");
-    //Sum Wh of last 24h
+    //Sum of consumption Wh of last 24h
     lcd.setCursor(0, 3);
     lcd.print(int(round(electricMeter24hConsumption*1000)));
     lcd.print("Wh   ");
     //Electric meter power
     lcd.setCursor(7, 3);
-    p = int(round(electricMeter_Power));
-    if (p==0) lcd.print(" ");
-    else if (p>0) lcd.print("+");
-    lcd.print(p);
+    if (decisiveMeterPower==0) lcd.print(" ");
+    else if (decisiveMeterPower>0) lcd.print("+");
+    lcd.print(decisiveMeterPower);
     lcd.print("W  ");
-    //Power measured from 1/10000kWh impulses
+    //Sum of feed-in Wh of last 24h
     lcd.setCursor(14, 3);
-    if (impulseMeterPower==0) lcd.print(" ");
-    else if (impulseMeterPower>0) lcd.print("+");
-    lcd.print(impulseMeterPower);
-    lcd.print("W");
-}
-
-void secondsToTime(int &hours, int &minutes, int &seconds, uint32_t largeSeconds)
-{
-  uint32_t t = largeSeconds;
-  int s = t % 60;       //get the seconds
-  t = (t - s)/60;
-  int m = t % 60;       //get the minutes
-  t = (t - m)/60;
-  int h = t % 24;       //get the hours
-  seconds = s;
-  minutes = m;
-  hours = h;
-}
-
-String secondsToTimeStr(uint32_t seconds, bool includeSeconds)
-{
-  uint32_t t = seconds;
-  int s = t % 60;       //get the seconds
-  t = (t - s)/60;
-  int m = t % 60;       //get the minutes
-  t = (t - m)/60;
-  int h = t % 24;       //get the hours
-  char time[9];
-  if (includeSeconds) sprintf(time,"%02d:%02d:%02d",h,m,s); else sprintf(time,"%02d:%02d",h,m);
-  return time;
+    int p = int(round(electricMeter24hFeedIn*1000));
+    lcd.print(p);
+    if (p <= 9999) lcd.print("Wh"); //Don't print "Wh" if value is more than 4 digits
 }
 
 String meterDeviceIdToStr(char *deviceID)
@@ -1856,14 +1924,11 @@ String meterDeviceIdToStr(char *deviceID)
   return str;
 }
 
-
 // ===========================================================================
-//                 Sends main webpage with basic information
+//                      Updates main webpage in memory
 // ---------------------------------------------------------------------------
-// This function handles displaying the web page as soon as one calls the IP
-// adress of the ESP32 in a webbrowser within the local network.
 // ===========================================================================
-void handleRoot() {
+void updateMainWebsite() {
   //mains on:
   String strMainsOn = "";
   bool on = (masterMultiLED_LEDon & 0x01);
@@ -1921,10 +1986,10 @@ void handleRoot() {
   if (on && blink) strTemperature = "<i>temperature</i>";
   if (!on && blink) strTemperature = "<i>temperature</i>";
   //build webpage
-  String webpage = "<!DOCTYPE html><html><head><title>ESP32 Multiplus ESS</title></head><body><font size=\"7\">";  //font size 7 is largest allowed
+  webpage = "<!DOCTYPE html><html><head><title>ESP32 Multiplus ESS</title></head><body><font size=\"7\">";  //font size 7 is largest allowed
   webpage += "<p><b>ESP32 Multiplus ESS</b></p>";
   if ((battery.soc >= 0) && (battery.soc <= 100)) {   //if SOC wihin valid range, show it as number on webpage
-    webpage += "Battery:    "+String(battery.soc)+"% (Th="+String(SOC_INVERTER_ON_OFF)+")<br>";
+    webpage += "Battery:    "+String(battery.soc)+"% (Th="+String(socInverterOnOff)+")<br>";
   } else {
     webpage += "Battery:    CAN bus connection failure! Multiplus disabled.<br>";
   }
@@ -1935,12 +2000,18 @@ void handleRoot() {
   webpage += "ESS power:  "+String(multiplusESSpower)+"W<br>";
   webpage += "ESP32 Switch-Mode: '"+String(switchMode)+"'<br>";
   webpage += "ESS power update strategy: "+String(essPowerStrategy)+"<br>";
-  webpage += "Leftover power: "+String(powerLeftover)+"W<br>";
-  if (shellysInitialized) webpage += "Shelly state: "+String(shellyState)+"<br>"; else webpage += "Shelly state: ?<br>";
+  webpage += String(int(round(SIZE_POWER_TREND_RINGBUF/60.0)))+"min cons. power trend: "+String(powerTrendConsumption, 1)+"Wh (Th="+String(POWER_TREND_TH)+")<br>";
+  webpage += String(int(round(SIZE_POWER_TREND_RINGBUF/60.0)))+"min feed-in power trend: "+String(powerTrendFeedIn, 1)+"Wh (Th="+String(POWER_TREND_TH)+")<br>";
+  webpage += "ESS min strategy time: "+secondsToTimeStr(secondsInMinStrategy,true)+"<br>";
+  webpage += "ESS max strategy time: "+secondsToTimeStr(secondsInMaxStrategy,true)+"<br>";
+  webpage += "Shelly state: "+String(shellyState)+"<br>";
   webpage += "Shelly actuations: "+String(shellyActuations)+"<br>";
-  if (shellyActuations>0) webpage += "Avg fails per actuation: "+String(float(shellyFails)/shellyActuations, 3)+"<br>";
-  webpage += String(int(round(SIZE_P_METER_RINGBUF/60.0)))+"min power trend: "+String(powerTrend/(60.0*60.0), 1)+"Wh (Th="+String(int(round(POWER_TREND_TH/(60.0*60.0))))+")<br>";
-  webpage += "ESS max strategy on-time: "+secondsToTimeStr(essPowerStrategy7ontime,true)+"<br>";
+  if (shellyActuations>0) webpage += "Avg. fails per actuation: "+String(float(shellyFails)/shellyActuations, 3)+"<br>";
+  webpage += "Minimum feed-in: "+String(minimumFeedIn)+"W<br>";
+  webpage += "Avg. ctrl deviation feed-in: "+String(averageControlDeviationFeedIn)+"W<br>";
+  webpage += "Avg. AC charging power: "+String(averageChargingPower)+"W<br>";
+  webpage += "Avg. BMS charging power: "+String(int(round(bmsPowerAverage)))+"W<br>";
+  webpage += "Shellys enabled by consumer rules: "+String(nrShellysEnabledByRule)+"<br>";
   webpage += "<br>";
   webpage += "<table>";
   webpage += "<tr><th>charger</th><th>inverter</th></tr>";
@@ -1949,6 +2020,8 @@ void handleRoot() {
   webpage += "<tr><td>&nbsp;&nbsp;&nbsp;"+strAbsorption+"</td><td>&nbsp;&nbsp;&nbsp;"+strLowBattery+"</td></tr>";
   webpage += "<tr><td>&nbsp;&nbsp;&nbsp;"+strFloat+"</td><td>&nbsp;&nbsp;&nbsp;"+strTemperature+"</td></tr>";
   webpage += "</table>";
+  webpage += "<button onclick=\"window.location.href='/shortpress'\">Short Press</button>";
+  webpage += "<button onclick=\"window.location.href='/longpress'\">Long Press</button>";
   webpage += "<br>";
   webpage += "<b>Multiplus</b><br>";
   webpage += "<table>";
@@ -1984,8 +2057,9 @@ void handleRoot() {
   webpage += "<tr><td>ID:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+meterDeviceIdToStr(electricMeter_DeviceID)+"</td></tr>";
   webpage += "<tr><td>Consumption:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Consumption)+" kWh</td></tr>";
   webpage += "<tr><td>Feed-in:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_FeedIn)+" kWh</td></tr>";
-  webpage += "<tr><td>Status 1.8.0:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Status180[0],HEX)+" "+String(electricMeter_Status180[1],HEX)+" "+String(electricMeter_Status180[2],HEX)+"</td></tr>";
-  webpage += "<tr><td>Status 2.8.0:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Status280[0],HEX)+" "+String(electricMeter_Status280[1],HEX)+" "+String(electricMeter_Status280[2],HEX)+"</td></tr>";
+  webpage += "<tr><td>Status 1.8.0:</td><td>&nbsp;&nbsp;&nbsp;</td><td>";
+  for (int i=0; i<MAX_METER_STATUS_BYTES; i++) webpage += String(electricMeter_Status180[i],HEX)+" ";
+  webpage += "</td></tr>";
   webpage += "<tr><td>Runtime:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_Runtime)+" sec = "+String(electricMeter_Runtime/(60*60*24))+" days</td></tr>";
   webpage += "<tr><td>Power L1:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_PowerL1)+"W</td></tr>";
   webpage += "<tr><td>Power L2:</td><td>&nbsp;&nbsp;&nbsp;</td><td>"+String(electricMeter_PowerL2)+"W</td></tr>";
@@ -2058,8 +2132,8 @@ void handleRoot() {
   webpage += "Multiplus temp. max: "+String(multiplusTempMax,1)+"&deg;C<br>";
   webpage += "BMS temp. min: "+String(batteryTempMin,1)+"&deg;C<br>";
   webpage += "BMS temp. max: "+String(batteryTempMax,1)+"&deg;C<br>";
-  webpage += "BMS current/power min: "+String(batteryCurrentMin,1)+"A/"+String(int(round(batteryPowerMin)))+"W<br>";
-  webpage += "BMS current/power max: "+String(batteryCurrentMax,1)+"A/"+String(int(round(batteryPowerMax)))+"W<br>";
+  webpage += "BMS current/power min: "+String(batteryCurrentMin,1)+"A/"+String(batteryPowerMin)+"W<br>";
+  webpage += "BMS current/power max: "+String(batteryCurrentMax,1)+"A/"+String(batteryPowerMax)+"W<br>";
   webpage += "Multiplus DC volt calibr.: "+String(1000*multiplusDcVoltageCalibration,1)+"mV<br>";
   webpage += "Multiplus DC volt cal cnt: "+String(multiplusDcVoltageCalibrationCnt)+"<br>";
   webpage += "Battery Rcable @charge: "+String(chargeCableResistance,1)+"m&#8486;<br>";
@@ -2067,9 +2141,22 @@ void handleRoot() {
   webpage += "Battery Rcable @discharge: "+String(dischargeCableResistance,1)+"m&#8486;<br>";
   webpage += "Battery Rcable dischg cnt: "+String(dischargeCableResistanceCnt)+"<br>";
   webpage += "<br>";
-  webpage += "<a href=\"logfile.txt\">logfile.txt of last actions</a><br>";
-  webpage += String(logfileCounter)+" bytes written since last logfile view";
+  webpage += "<a href=\"logfileAll.txt\">logfileAll.txt of last actions</a><br>";
+  webpage += String(logfileAllCounter)+" bytes written since last logfile view<br>";
+  webpage += "<br>";
+  webpage += "<a href=\"logfileFew.txt\">logfileFew.txt of last actions</a><br>";
+  webpage += String(logfileFewCounter)+" bytes written since last logfile view<br>";
   webpage += "</font></body></html>";
+}
+
+
+// ===========================================================================
+//                          Sends main webpage
+// ---------------------------------------------------------------------------
+// This function handles displaying the web page as soon as one calls the IP
+// adress of the ESP32 in a webbrowser within the local network.
+// ===========================================================================
+void handleRoot() {
   server.send(200, "text/html", webpage);
 }
 
@@ -2078,7 +2165,7 @@ void handleRoot() {
 // ---------------------------------------------------------------------------
 // This function handles displaying/sending a file called logfile.txt as soon
 // as one clicks on the link on the ESP32 webpage.
-// The logfile has a size of (LOGFILE_SIZE) and is overwritten like a
+// The logfile has a size of (LOGFILE_ALL_SIZE) and is overwritten like a
 // ringbuffer. So when it's full, oldest information is overwritten first.
 // Improvement:
 // Normally I would've displayed the logfile always from oldest to newest
@@ -2088,12 +2175,30 @@ void handleRoot() {
 // a "bar" into it, showing that above this bar it ends with the newest
 // information and below this bar it starts with the oldest information.
 // ===========================================================================
-void handleLogfile() {
-  int tmp = p_logfile;    //save logfile position pointer
-  addToLogfile("\nMeter ACin Target Leftover ## newest above ##\n\n\n\n\n\n\n\n\n\n\n############# oldest entry below ############\n");  //temporary text marker
-  server.send(200, "text/plain", logfile);
-  p_logfile = tmp;    //restore original pointer so that temporary text will be overwritten again
-  if (!stopWritingLogfile) logfileCounter = 0;     //viewing the logfile resets the logfile size counter (but only if logging will NOT end soon)
+void handleLogfileAll() {
+  int tmp = p_logfileAll;    //save logfile position pointer
+  addToLogfile("\nMeter ACin ESSpower ##### newest above ######\n\n\n\n\n\n\n\n\n\n\n############# oldest entry below ############\n",1);  //temporary text marker
+  server.send(200, "text/plain", logfileAll);
+  p_logfileAll = tmp;    //restore original pointer so that temporary text will be overwritten again
+  logfileAllCounter = 0;     //viewing the logfile resets the logfile size counter
+}
+
+void handleLogfileFew() {
+  int tmp = p_logfileFew;    //save logfile position pointer
+  addToLogfile("\n#### newest above ####\n",2);  //temporary text marker
+  server.send(200, "text/plain", logfileFew);
+  p_logfileFew = tmp;    //restore original pointer so that temporary text will be overwritten again
+  logfileFewCounter = 0;     //viewing the logfile resets the logfile size counter
+}
+
+void handleButtonShortpress() {
+  buttonPressCnt = BUTTON_DEBOUNCE_TIME;
+  server.send(200, "text/html", "<meta http-equiv=\"refresh\" content=\"0; URL=/\">");
+}
+
+void handleButtonLongpress() {
+  buttonPressCnt = BUTTON_LONGPRESS_TIME;
+  server.send(200, "text/html", "<meta http-equiv=\"refresh\" content=\"0; URL=/\">");
 }
 
 void handleNotFound() {
@@ -2122,7 +2227,7 @@ void handleNotFound() {
 //                        |_|    
 // ################################
 void setup() {
-  addToLogfile("ESP32ESS START\n");
+  addToLogfile("\nESP32ESS START",3);
   //settings CAN/TWAI bus to battery
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX_PIN, (gpio_num_t)CAN_RX_PIN, TWAI_MODE_NORMAL);
   twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();  //Look in the api-reference for other speed sets.
@@ -2158,6 +2263,8 @@ void setup() {
   pinMode(METER_IMPULSE_INPUT_PIN, INPUT);//Power meter optical 1/10000kWh impulse input, currently evaluated in ISR
   pinMode(RED_LED, OUTPUT);            //Red LED currently showing the optical impulse from the power meter
   digitalWrite(RED_LED, LOW);          //turn red LED off
+  pinMode(SHELLY_CF, OUTPUT);          //Pin with frequency pulses resulting in desired "power" on external Shelly 1PM
+  digitalWrite(SHELLY_CF, LOW);        //Low is default state, pulses should be 38us long
   //Init webserver
   WiFi.mode(WIFI_STA);
   WiFi.begin(SSID, PASSWORD);
@@ -2165,7 +2272,10 @@ void setup() {
   // server.on("/", []() {
   //   server.send(200, "text/plain", "this works as well");
   // });
-  server.on("/logfile.txt", handleLogfile);
+  server.on("/logfileAll.txt", handleLogfileAll);
+  server.on("/logfileFew.txt", handleLogfileFew);
+  server.on("/shortpress", handleButtonShortpress);
+  server.on("/longpress", handleButtonLongpress);
   server.onNotFound(handleNotFound);
   server.begin();
   //set up interrupt timer for ISR
@@ -2243,7 +2353,7 @@ void veBusHandling(void * parameter)
           }
           else {
             //only add wrong frame to logfile, don't decode
-            addToLogfile("\nwrong CS:");
+            addToLogfile("\nwrong CS:",1);
             addFrameToLogfile(frbuf0,0,frp-1);  //add complete frame into logfile
             veRxCmdFailCnt++;                   //amount of received commands with wrong checksum
           }
@@ -2265,15 +2375,16 @@ void veBusHandling(void * parameter)
 // #################################################
 void loop() {
   relativeTimers();                           //generate oneSecondOver and oneMinuteOver flags
-  automaticChargerOnlySwitching();            //Switch Multiplus into ChargerOnly-Mode if battery is below specific level
+  automaticSwitching();                       //Switch Multiplus into ChargerOnly-Mode if battery is below specific level
   veCmdReSendHandling();                      //Multiplus VEbus: Process VEbus information and execute command-sending state machine
   batteryHandling();                          //Battery: Get BMS values (e.g. SOC battery level) from CAN bus, if available
   checkSMLpowerMeter();                       //Power meter with Info-DSS: Check if new values are received and decode them
   checkImpulsePowerMeter();                   //Check if we also got new absolute meter value from 1/10000kWh impulses
   decideElectricMeterValueToUse();
   onNewMeterValue();                          //If new power value is available, add to logfile. Also calculates and sends new ESS power into Multiplus.
-  shellyControl();                            //If there is power left over (sun & battery full) then turn on/off Shellys trying to use excess power
+  controlConsumerShellys();
   switchSpecialModes();                       //handle BOOT button press activities (GPIO0)
   updateDisplays();                           //update Display and LEDs
-  server.handleClient();                    //handle webserver HTTP requests
+  updateMainWebsite();
+  server.handleClient();                      //handle webserver HTTP requests
 }
